@@ -71,7 +71,7 @@ tab1, tab2, tab3 = st.tabs(["📊 Overview", "🔍 Analisa Per Unit", "📈 Scat
 
 # TAB 1: OVERVIEW
 with tab1:
-    st.header("Ringkasan Performa Armada")
+    st.header("Ringkasan Performa Unit Alat Berat")
     
     col1, col2, col3, col4 = st.columns(4)
     
