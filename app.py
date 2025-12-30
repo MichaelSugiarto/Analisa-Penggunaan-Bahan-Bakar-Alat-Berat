@@ -239,4 +239,4 @@ with tab3:
         
         st.plotly_chart(fig_scatter, use_container_width=True)
     else:
-        st.warning("Tidak ada data valid untuk Scatter Plot.")
+        st.warning("Tidak ada data valid untuk Scatter Plot")
