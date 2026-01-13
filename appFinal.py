@@ -119,7 +119,7 @@ if analysis_mode == "Group KPI":
     st.markdown("---")
     
     # --- TABS ---
-    tab0, tab1, tab2 = st.tabs(["📋 Overview Data", "📉 Persebaran Efisiensi Setiap Unit", "💰 Top 10 Unit Pemborosan"])
+    tab0, tab1, tab2 = st.tabs(["📋 Overview Data", "📉 Persebaran Efisiensi Setiap Unit", "💰 Top 10 Unit Terboros"])
     
     with tab0:
         st.subheader(f"Detail Data: {selected_group}")
@@ -284,7 +284,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     
     # Tab B: Peringkat
     with tab_b:
-        st.subheader("Peringkat Efisiensi Setiap Unit")
+        st.subheader("Peringkat Efisiensi Unit")
         fig_bar = px.bar(
             df_active, x='Unit_Name', y='Fuel_Ratio', color='Fuel_Ratio',
             color_continuous_scale='RdYlGn_r', text_auto='.2f',
@@ -292,10 +292,11 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
         )
         fig_bar.add_hline(y=avg_ratio_group, line_dash="dash", annotation_text="Benchmark")
         st.plotly_chart(fig_bar, use_container_width=True)
-        
+    
+    
     # Tab C: Scatter (REVISI: STATUS COLOR HIJAU/MERAH SAJA)
     with tab_c:
-        st.subheader("Peta Jam Kerja vs BBM")
+        st.subheader("Jam Kerja vs BBM")
         
         # Mapping Warna agar Efisien=Hijau, Boros=Merah (Tanpa Gradasi Angka)
         color_map_status = {"EFISIEN": "#2ca02c", "BOROS": "#d62728"}
