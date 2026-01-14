@@ -29,10 +29,19 @@ def load_data():
     try:
         df_master = pd.read_excel('cost & bbm 2022 sd 2025.xlsx', header=1)
         if 'NAMA ALAT BERAT' in df_master.columns and 'DES 2025' in df_master.columns:
-            map_loc = dict(zip(
-                df_master['NAMA ALAT BERAT'].astype(str).str.strip().str.upper(), 
-                df_master['DES 2025']
-            ))
+            # [UPDATE] Logika Normalisasi Nama (Handle simbol / dan .)
+            for _, row in df_master.iterrows():
+                u_name = str(row['NAMA ALAT BERAT']).strip().upper()
+                loc = row['DES 2025']
+                
+                # 1. Simpan nama asli
+                map_loc[u_name] = loc
+                
+                # 2. Simpan versi normalisasi (hapus / dan . dan spasi ganda)
+                # Contoh: "L 8039 US / S74" akan disimpan juga sebagai "L 8039 US S74"
+                u_norm = " ".join(u_name.replace('/', ' ').replace('.', ' ').split())
+                map_loc[u_norm] = loc
+                
     except Exception:
         pass 
 
@@ -59,9 +68,20 @@ def load_data():
     if data_inaktif is not None and map_loc:
         def fill_loc(row):
             current_loc = str(row.get('Lokasi', '-'))
-            unit_name = str(row['Unit_Name']).strip().upper()
+            
             if current_loc in ['-', 'nan', 'None', '']:
-                return map_loc.get(unit_name, "-")
+                unit_name = str(row['Unit_Name']).strip().upper()
+                
+                # Cek 1: Exact Match
+                if unit_name in map_loc:
+                    return map_loc[unit_name]
+                
+                # Cek 2: Normalized Match (Cek versi tanpa simbol)
+                unit_norm = " ".join(unit_name.replace('/', ' ').replace('.', ' ').split())
+                if unit_norm in map_loc:
+                    return map_loc[unit_norm]
+                
+                return "-"
             return current_loc
             
         if 'Lokasi' not in data_inaktif.columns:
@@ -338,7 +358,6 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
             title=f"Konsumsi BBM (Liter/Jam)"
         )
         
-        # [UPDATE] MENGGUNAKAN ADD_HLINE UNTUK GARIS UJUNG KE UJUNG
         fig_bar.add_hline(
             y=avg_ratio_group,
             line_dash="dash",
