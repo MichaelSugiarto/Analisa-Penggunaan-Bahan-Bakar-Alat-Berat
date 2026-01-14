@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import os
 
 # ==============================================================================
 # 1. KONFIGURASI HALAMAN
@@ -22,14 +23,26 @@ def load_data():
     data_kpi = None
     data_unit = None
     data_inaktif = None
+    map_loc = {}
     
-    # 1. Load Data untuk Mode KPI (File Lama)
+    # 0. Load Master Data (Untuk Mapping Lokasi Unit Inaktif)
+    try:
+        df_master = pd.read_excel('cost & bbm 2022 sd 2025.xlsx', header=1)
+        if 'NAMA ALAT BERAT' in df_master.columns and 'DES 2025' in df_master.columns:
+            map_loc = dict(zip(
+                df_master['NAMA ALAT BERAT'].astype(str).str.strip().str.upper(), 
+                df_master['DES 2025']
+            ))
+    except Exception:
+        pass 
+
+    # 1. Load Data untuk Mode KPI
     try:
         data_kpi = pd.read_excel('Laporan_Benchmark_BBM.xlsx')
     except FileNotFoundError:
         pass
 
-    # 2. Load Data untuk Mode Jenis Alat (File Baru)
+    # 2. Load Data untuk Mode Jenis Alat
     possible_files = ['Analisa_Benchmark_Alat_Berat.xlsx', 'Benchmark_Per_Alat_Berat_Data_Baru.xlsx']
     
     for f in possible_files:
@@ -41,7 +54,21 @@ def load_data():
             continue
         except Exception:
             continue
-        
+    
+    # Apply Location Map
+    if data_inaktif is not None and map_loc:
+        def fill_loc(row):
+            current_loc = str(row.get('Lokasi', '-'))
+            unit_name = str(row['Unit_Name']).strip().upper()
+            if current_loc in ['-', 'nan', 'None', '']:
+                return map_loc.get(unit_name, "-")
+            return current_loc
+            
+        if 'Lokasi' not in data_inaktif.columns:
+            data_inaktif['Lokasi'] = "-"
+            
+        data_inaktif['Lokasi'] = data_inaktif.apply(fill_loc, axis=1)
+
     return data_kpi, data_unit, data_inaktif
 
 df_kpi, df_unit, df_inaktif = load_data()
@@ -90,7 +117,18 @@ if analysis_mode == "Group KPI":
         res_kpi = df_kpi[df_kpi['Unit'].astype(str).str.contains(search_kpi, na=False)]
         if not res_kpi.empty:
             st.info(f"Ditemukan {len(res_kpi)} Unit:")
-            st.dataframe(res_kpi)
+            
+            cols_to_show = ['Unit', 'Category', 'Total_Solar_Liter', 'Total_Jam', 'Rata_Rata_Efisiensi']
+            bench_col = None
+            if 'Benchmark_Median' in res_kpi.columns:
+                bench_col = 'Benchmark_Median'
+                cols_to_show.append(bench_col)
+            
+            rename_map = {'Rata_Rata_Efisiensi': 'Fuel_Ratio'}
+            if bench_col:
+                rename_map[bench_col] = 'Benchmark'
+                
+            st.dataframe(res_kpi[cols_to_show].rename(columns=rename_map))
         else:
             st.warning("Unit Tidak Ditemukan.")
     st.markdown("---")
@@ -101,6 +139,14 @@ if analysis_mode == "Group KPI":
     col_durasi = next((c for c in df_kpi.columns if 'Total_Jam' in c or 'HM' in c), 'Total_Jam')
     df_view = df_kpi[df_kpi['Benchmark_Group'] == selected_group].copy()
     
+    # Unit Inaktif Check
+    if df_inaktif is not None:
+        df_inactive_kpi = df_inaktif[df_inaktif['Benchmark_Group'] == selected_group]
+        if not df_inactive_kpi.empty:
+             with st.expander(f"⚠️ {len(df_inactive_kpi)} Unit Tidak Masuk Analisa"):
+                st.warning(f"Unit berikut masuk dalam grup **{selected_group}** tetapi memiliki Total HM=0 atau BBM=0.")
+                st.dataframe(df_inactive_kpi[['Unit_Name', 'Lokasi', 'Total_Liter', 'Total_HM_Work']])
+
     # KPI Metrics
     total_solar = df_view['Total_Solar_Liter'].sum()
     total_jam = df_view[col_durasi].sum()
@@ -129,12 +175,11 @@ if analysis_mode == "Group KPI":
             .style.format({'Total_Solar_Liter': '{:,.0f}', col_durasi: '{:,.0f}', 'Rata_Rata_Efisiensi': '{:.2f}', 'Potensi_Pemborosan_Liter': '{:,.0f}'})
         )
 
-    # TAB 1: SCATTER MATRIX (UPDATE: Tambah Hover Potensi Pemborosan)
+    # TAB 1: SCATTER MATRIX
     with tab1:
         color_col = 'Status_BBM' if 'Status_BBM' in df_view.columns else None
         color_map = {"EFISIEN (Hijau)": "#2ca02c", "BOROS (Merah)": "#d62728"} if color_col else None
         
-        # Siapkan Hover Data
         hover_data_kpi = {col_durasi: True, 'Total_Solar_Liter': True}
         if 'Potensi_Pemborosan_Liter' in df_view.columns:
             hover_data_kpi['Potensi_Pemborosan_Liter'] = ':,.0f'
@@ -186,7 +231,12 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
         
         if not res_all.empty:
             st.info(f"Ditemukan {len(res_all)} Unit:")
-            st.dataframe(res_all[['Unit_Name', 'Jenis_Alat', 'Capacity', 'Lokasi', 'Status', 'Fuel_Ratio', 'Total_Liter']])
+            
+            cols = ['Unit_Name', 'Jenis_Alat', 'Capacity', 'Lokasi', 'Status', 'Fuel_Ratio', 'Total_Liter']
+            if 'Group_Benchmark_Median' in res_all.columns:
+                cols.append('Group_Benchmark_Median')
+                
+            st.dataframe(res_all[cols].rename(columns={'Group_Benchmark_Median': 'Benchmark'}))
         else:
             st.warning("Unit Tidak Ditemukan.")
     
@@ -215,14 +265,11 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     # Filter Inaktif
     df_inactive_show = pd.DataFrame()
     if df_inaktif is not None:
-        # Filter Jenis
         df_in_temp = df_inaktif[df_inaktif['Jenis_Alat'] == selected_jenis].copy()
         if not df_in_temp.empty:
-            # Cek apakah ada kolom Capacity
             if 'Capacity' in df_in_temp.columns and df_in_temp['Capacity'].iloc[0] != "-":
                 df_inactive_show = df_in_temp[df_in_temp['Capacity'].astype(str) == str(selected_cap)]
             else:
-                # Fallback ke Benchmark Group string matching
                 search_str = f"({selected_cap}T)"
                 df_inactive_show = df_in_temp[df_in_temp['Benchmark_Group'].astype(str).str.contains(search_str, regex=False)]
     
@@ -284,28 +331,37 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     
     # Tab B: Peringkat
     with tab_b:
-        st.subheader("Peringkat Efisiensi Unit")
+        st.subheader("Peringkat Efisiensi Setiap Unit")
         fig_bar = px.bar(
             df_active, x='Unit_Name', y='Fuel_Ratio', color='Fuel_Ratio',
             color_continuous_scale='RdYlGn_r', text_auto='.2f',
             title=f"Konsumsi BBM (Liter/Jam)"
         )
-        fig_bar.add_hline(y=avg_ratio_group, line_dash="dash", annotation_text="Benchmark")
-        st.plotly_chart(fig_bar, use_container_width=True)
-    
-    
-    # Tab C: Scatter (REVISI: STATUS COLOR HIJAU/MERAH SAJA)
-    with tab_c:
-        st.subheader("Jam Kerja vs BBM")
         
-        # Mapping Warna agar Efisien=Hijau, Boros=Merah (Tanpa Gradasi Angka)
+        # [UPDATE] MENGGUNAKAN ADD_HLINE UNTUK GARIS UJUNG KE UJUNG
+        fig_bar.add_hline(
+            y=avg_ratio_group,
+            line_dash="dash",
+            line_color="white",
+            line_width=2,
+            annotation_text=f"Benchmark: {avg_ratio_group:.2f} L/Jam",
+            annotation_position="top right",
+            annotation_font_color="white"
+        )
+        
+        st.plotly_chart(fig_bar, use_container_width=True)
+        
+    # Tab C: Scatter
+    with tab_c:
+        st.subheader("Peta Jam Kerja vs BBM")
+        
         color_map_status = {"EFISIEN": "#2ca02c", "BOROS": "#d62728"}
         
         fig_scat = px.scatter(
             df_active, 
             x='Total_HM_Work', 
             y='Total_Liter', 
-            color='Performance_Status', # Ganti color jadi Status Kategorikal
+            color='Performance_Status', 
             size='Total_Liter',
             hover_name='Unit_Name', 
             hover_data={
@@ -316,7 +372,5 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
             color_discrete_map=color_map_status,
             title="Sebaran Efisiensi Unit"
         )
-        
-        # Garis Benchmark DIHAPUS sesuai permintaan
         
         st.plotly_chart(fig_scat, use_container_width=True)
