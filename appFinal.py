@@ -38,7 +38,6 @@ def load_data():
                 map_loc[u_name] = loc
                 
                 # 2. Simpan versi normalisasi (hapus / dan . dan spasi ganda)
-                # Contoh: "L 8039 US / S74" akan disimpan juga sebagai "L 8039 US S74"
                 u_norm = " ".join(u_name.replace('/', ' ').replace('.', ' ').split())
                 map_loc[u_norm] = loc
                 
@@ -52,7 +51,7 @@ def load_data():
         pass
 
     # 2. Load Data untuk Mode Jenis Alat
-    possible_files = ['Analisa_Benchmark_Alat_Berat.xlsx', 'Benchmark_Per_Alat_Berat_Data_Baru.xlsx']
+    possible_files = ['Benchmark_Per_Alat_Berat_Data_Baru.xlsx']
     
     for f in possible_files:
         try:
@@ -76,7 +75,7 @@ def load_data():
                 if unit_name in map_loc:
                     return map_loc[unit_name]
                 
-                # Cek 2: Normalized Match (Cek versi tanpa simbol)
+                # Cek 2: Normalized Match
                 unit_norm = " ".join(unit_name.replace('/', ' ').replace('.', ' ').split())
                 if unit_norm in map_loc:
                     return map_loc[unit_norm]
@@ -269,10 +268,24 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     jenis_list = sorted(df_unit['Jenis_Alat'].astype(str).unique())
     selected_jenis = st.sidebar.selectbox("1. Pilih Jenis Alat:", jenis_list)
     
-    # 2. Pilih Kapasitas
+    # 2. Pilih Kapasitas (LOGIKA BARU SESUAI REQUEST)
+    # Filter dulu data berdasarkan jenis
     df_jenis_filtered = df_unit[df_unit['Jenis_Alat'] == selected_jenis]
-    cap_list = sorted(df_jenis_filtered['Capacity'].unique())
-    selected_cap = st.sidebar.selectbox("2. Pilih Kapasitas (Ton):", cap_list)
+    
+    # Buat Opsi Kapasitas Baru
+    cap_options = []
+    
+    if selected_jenis in ['FORKLIFT', 'SIDE LOADER']:
+        cap_options = ['Di Bawah 5 Ton', 'Di Bawah 10 Ton', 'Di Bawah 15 Ton']
+    elif selected_jenis == 'CRANE':
+        cap_options = ['Di Bawah 100 Ton', 'Di Atas 100 Ton']
+    elif selected_jenis in ['REACH STACKER', 'TOP LOADER']:
+        cap_options = ['Di Atas 35 Ton']
+    else:
+        # Default jika ada jenis lain
+        cap_options = sorted(df_jenis_filtered['Capacity'].unique().astype(str).tolist())
+        
+    selected_cap_filter = st.sidebar.selectbox("2. Pilih Kategori Kapasitas:", cap_options)
     
     # 3. Input Harga Solar
     st.sidebar.markdown("---")
@@ -280,33 +293,52 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     harga_solar = st.sidebar.number_input("Harga Solar (IDR):", value=6800, step=100, key='solar_alat')
     
     # --- FILTER FINAL ---
-    df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] == selected_cap].copy()
-    
-    # Filter Inaktif
+    # Logika Filter berdasarkan Kategori Baru
+    df_active = pd.DataFrame()
     df_inactive_show = pd.DataFrame()
+    
+    # Pastikan capacity numeric
+    df_jenis_filtered['Capacity'] = pd.to_numeric(df_jenis_filtered['Capacity'], errors='coerce').fillna(0)
+    
+    if selected_cap_filter == 'Di Bawah 5 Ton':
+        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 5].copy()
+    elif selected_cap_filter == 'Di Bawah 10 Ton':
+        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 10].copy()
+    elif selected_cap_filter == 'Di Bawah 15 Ton':
+        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 15].copy()
+    elif selected_cap_filter == 'Di Bawah 100 Ton':
+        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 100].copy()
+    elif selected_cap_filter == 'Di Atas 100 Ton':
+        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] >= 100].copy()
+    elif selected_cap_filter == 'Di Atas 35 Ton':
+        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] > 35].copy()
+    else:
+        # Fallback jika user pilih angka spesifik (opsional)
+        try:
+             val = float(selected_cap_filter)
+             df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] == val].copy()
+        except:
+             df_active = df_jenis_filtered.copy()
+    
+    # Filter Inaktif Logic
     if df_inaktif is not None:
-        df_in_temp = df_inaktif[df_inaktif['Jenis_Alat'] == selected_jenis].copy()
-        if not df_in_temp.empty:
-            if 'Capacity' in df_in_temp.columns and df_in_temp['Capacity'].iloc[0] != "-":
-                df_inactive_show = df_in_temp[df_in_temp['Capacity'].astype(str) == str(selected_cap)]
-            else:
-                search_str = f"({selected_cap}T)"
-                df_inactive_show = df_in_temp[df_in_temp['Benchmark_Group'].astype(str).str.contains(search_str, regex=False)]
+        df_inactive_show = df_inaktif[df_inaktif['Jenis_Alat'] == selected_jenis].copy()
     
     # --- MAIN CONTENT ---
-    st.subheader(f"Analisa: {selected_jenis} - Kapasitas {selected_cap} Ton")
+    st.subheader(f"Analisa: {selected_jenis} - {selected_cap_filter}")
     
     if not df_inactive_show.empty:
-        with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa"):
-            st.warning(f"Unit berikut tercatat sebagai **{selected_jenis} {selected_cap}T** tetapi memiliki Total HM=0 atau BBM=0.")
+        with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa (Inaktif pada jenis ini)"):
             st.dataframe(df_inactive_show[['Unit_Name', 'Lokasi', 'Total_Liter', 'Total_HM_Work']])
             
     if df_active.empty:
-        st.warning(f"Tidak ada unit aktif untuk kategori {selected_jenis} {selected_cap} Ton.")
+        st.warning(f"Tidak ada unit aktif untuk kategori {selected_jenis} {selected_cap_filter}.")
         st.stop()
 
     # --- KPI CALCULATIONS ---
-    avg_ratio_group = df_active['Total_Liter'].sum() / df_active['Total_HM_Work'].sum()
+    # [PERBAIKAN]: Ambil nilai benchmark langsung dari kolom Group_Benchmark_Median (Nilai Median Pre-calculated)
+    benchmark_val = df_active['Group_Benchmark_Median'].iloc[0] if 'Group_Benchmark_Median' in df_active.columns else 0
+    
     total_waste = df_active['Potensi_Pemborosan_Liter'].sum()
     total_loss_rp = total_waste * harga_solar
     
@@ -324,29 +356,35 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     # --- METRICS ---
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Populasi Aktif", f"{len(df_active)} Unit")
-    m2.metric("Benchmark Berdasarkan Filter", f"{avg_ratio_group:.2f} L/Jam")
+    m2.metric("Benchmark (Median)", f"{benchmark_val:.2f} L/Jam")
     m3.metric("Estimasi Kerugian", f"Rp {total_loss_rp:,.0f}", help=f"{total_waste:,.0f} Liter Terbuang")
     m4.metric(f"Teririt: {best_unit['Unit_Name']}", f"{best_unit['Fuel_Ratio']:.2f} L/Jam")
     
     st.markdown("---")
     
     # --- TABS ---
-    tab_a, tab_b, tab_c = st.tabs(["📋 Overview Data", "📊 Efisiensi Setiap Unit", "📉 Persebaran Efisiensi Setiap Unit"])
+    tab_a, tab_b, tab_c, tab_d = st.tabs(["📋 Overview Data", "📊 Efisiensi Setiap Unit", "📉 Persebaran Efisiensi Setiap Unit", "⛽ Unit Terboros"])
     
-    # Tab A: Data Detail
+    # Tab A: Data Detail (PERBAIKAN WARNA TABEL: HIJAU/MERAH TEGAS & TAMBAH CAPACITY)
     with tab_a:
         st.subheader("Detail Unit Aktif")
         st.info(f"**Total Pemborosan**: **{total_waste:,.0f} Liter** setara dengan **Rp {total_loss_rp:,.0f}**")
         
+        # Fungsi styling custom untuk Fuel Ratio
+        def highlight_status(row):
+            color = '#2ca02c' if row['Performance_Status'] == 'EFISIEN' else '#d62728' # Green vs Red
+            return [f'background-color: {color}; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+
         st.dataframe(
-            df_active[['Unit_Name', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']]
+            df_active[['Unit_Name', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']]
             .style.format({
+                'Capacity': '{:.0f}',
                 'Total_Liter': '{:,.0f}', 
                 'Total_HM_Work': '{:,.0f}', 
                 'Fuel_Ratio': '{:.2f}',
                 'Potensi_Pemborosan_Liter': '{:,.0f}'
             })
-            .background_gradient(subset=['Fuel_Ratio'], cmap='RdYlGn_r')
+            .apply(highlight_status, axis=1) # Terapkan warna tegas
         )
     
     # Tab B: Peringkat
@@ -359,11 +397,11 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
         )
         
         fig_bar.add_hline(
-            y=avg_ratio_group,
+            y=benchmark_val, # Gunakan nilai benchmark yang benar
             line_dash="dash",
             line_color="white",
             line_width=2,
-            annotation_text=f"Benchmark: {avg_ratio_group:.2f} L/Jam",
+            annotation_text=f"Benchmark: {benchmark_val:.2f} L/Jam",
             annotation_position="top right",
             annotation_font_color="white"
         )
@@ -393,3 +431,28 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
         )
         
         st.plotly_chart(fig_scat, use_container_width=True)
+
+    # Tab D: Analisa Pemborosan (SECTION BARU)
+    with tab_d:
+        st.subheader("Kontribusi Pemborosan Terbesar")
+        
+        # Filter hanya yang boros (> 0)
+        df_boros = df_active[df_active['Potensi_Pemborosan_Liter'] > 0].copy()
+        
+        if not df_boros.empty:
+            df_boros.sort_values('Potensi_Pemborosan_Liter', ascending=True, inplace=True) # Ascending for horizontal bar
+            
+            fig_waste = px.bar(
+                df_boros.tail(10), # Top 10
+                x='Potensi_Pemborosan_Liter',
+                y='Unit_Name',
+                orientation='h',
+                title="Unit dengan Potensi Pemborosan Tertinggi (Liter)",
+                text_auto='.0f',
+                color='Potensi_Pemborosan_Liter',
+                color_continuous_scale='Reds'
+            )
+            fig_waste.update_layout(xaxis_title="Potensi Pemborosan (Liter)", yaxis_title="Nama Unit")
+            st.plotly_chart(fig_waste, use_container_width=True)
+        else:
+            st.success("✅ Tidak ada unit yang terindikasi boros dalam kategori ini.")
