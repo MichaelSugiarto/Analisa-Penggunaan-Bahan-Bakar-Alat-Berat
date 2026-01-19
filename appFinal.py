@@ -17,27 +17,76 @@ st.set_page_config(
 st.title("Dashboard Monitoring Efisiensi BBM")
 
 # ==============================================================================
-# 2. LOAD DATA UTAMA
+# 2. LOAD DATA UTAMA (SUPER ROBUST MAPPING)
 # ==============================================================================
 @st.cache_data
 def load_data():
     data_kpi = None
     data_unit = None
     data_inaktif = None
-    map_loc = {}
     
-    # 0. Load Master Data
+    # Dictionary Mapping
+    map_loc = {}
+    map_cap = {} 
+    
+    # Fungsi Pembersih Nama Ekstrem (Hanya Huruf & Angka)
+    def clean_key(text):
+        if pd.isna(text): return ""
+        # Buang semua simbol & spasi, uppercase
+        return re.sub(r'[^A-Z0-9]', '', str(text).upper())
+
+    # 0. Load Master Data (cost & bbm 2022 sd 2025.xlsx)
     try:
         df_master = pd.read_excel('cost & bbm 2022 sd 2025.xlsx', header=1)
-        if 'NAMA ALAT BERAT' in df_master.columns and 'DES 2025' in df_master.columns:
+        
+        # Cari Kolom
+        col_name_master = next((c for c in df_master.columns if 'NAMA' in str(c).upper()), None)
+        cap_keywords = ['KAPASITAS', 'CAPACITY', 'CAP', 'TON', 'CLASS']
+        col_cap_master = next((c for c in df_master.columns if any(k in str(c).upper() for k in cap_keywords)), None)
+        col_loc_master = 'DES 2025' # Hardcoded sesuai request
+        
+        if col_name_master and col_loc_master in df_master.columns:
             for _, row in df_master.iterrows():
-                u_name = str(row['NAMA ALAT BERAT']).strip().upper()
-                loc = row['DES 2025']
-                map_loc[u_name] = loc
-                u_norm = " ".join(u_name.replace('/', ' ').replace('.', ' ').split())
-                map_loc[u_norm] = loc
-    except Exception:
-        pass 
+                u_name = str(row[col_name_master]).strip().upper()
+                u_key = clean_key(u_name) # Key Super Bersih
+                
+                loc_val = str(row[col_loc_master])
+                
+                # Parsing Capacity
+                cap_val = 0
+                
+                # Cara A: Dari Kolom Kapasitas
+                if col_cap_master:
+                    try:
+                        raw_cap = str(row[col_cap_master])
+                        match = re.search(r"(\d+(\.\d+)?)", raw_cap)
+                        if match:
+                            val_float = float(match.group(1))
+                            cap_val = int(val_float + 0.5)
+                    except:
+                        pass
+                
+                # Cara B: Backup dari Nama Unit
+                if cap_val == 0:
+                    try:
+                        match_name = re.search(r"(\d+(\.\d+)?)\s*(T|TON|K)", u_name)
+                        if match_name:
+                            val_float = float(match_name.group(1))
+                            cap_val = int(val_float + 0.5)
+                    except:
+                        pass
+                
+                # Simpan ke Map (Key Asli & Key Bersih)
+                if u_name not in map_loc: map_loc[u_name] = loc_val
+                if u_key not in map_loc:  map_loc[u_key] = loc_val
+                
+                if cap_val > 0:
+                    if u_name not in map_cap: map_cap[u_name] = cap_val
+                    if u_key not in map_cap:  map_cap[u_key] = cap_val
+                    
+    except Exception as e:
+        # print(f"Error Master: {e}") 
+        pass
 
     # 1. Load Data KPI
     try:
@@ -45,11 +94,17 @@ def load_data():
     except FileNotFoundError:
         pass
 
-    # 2. Load Data Unit Aktif
+    # 2. Load Data Unit Aktif & Inaktif
     possible_files = ['Benchmark_Per_Alat_Berat_Data_Baru.xlsx']
     for f in possible_files:
         try:
             data_unit = pd.read_excel(f, sheet_name='Rapor_Unit_Aktif')
+            
+            # Rounding Capacity pada Data Unit Aktif
+            if 'Capacity' in data_unit.columns:
+                data_unit['Capacity'] = pd.to_numeric(data_unit['Capacity'], errors='coerce').fillna(0)
+                data_unit['Capacity'] = data_unit['Capacity'].apply(lambda x: int(x + 0.5))
+
             data_inaktif = pd.read_excel(f, sheet_name='Unit_Inaktif')
             break 
         except FileNotFoundError:
@@ -57,27 +112,49 @@ def load_data():
         except Exception:
             continue
     
-    # Apply Location Map
-    if data_inaktif is not None and map_loc:
-        def fill_loc(row):
-            current_loc = str(row.get('Lokasi', '-'))
-            if current_loc in ['-', 'nan', 'None', '']:
-                unit_name = str(row['Unit_Name']).strip().upper()
-                if unit_name in map_loc: return map_loc[unit_name]
-                unit_norm = " ".join(unit_name.replace('/', ' ').replace('.', ' ').split())
-                if unit_norm in map_loc: return map_loc[unit_norm]
-                return "-"
-            return current_loc
+    # 3. ISI DATA KOSONG PADA INAKTIF
+    if data_inaktif is not None:
         
+        # Helper untuk mencari data
+        def get_master_data(unit_name, map_dict, default_val):
+            clean_name = str(unit_name).strip().upper()
+            if clean_name in map_dict:
+                return map_dict[clean_name]
+            
+            super_clean = clean_key(unit_name)
+            if super_clean in map_dict:
+                return map_dict[super_clean]
+            
+            return default_val
+
+        def fix_inaktif_row(row):
+            # Fix Lokasi
+            curr_loc = str(row.get('Lokasi', '-'))
+            if curr_loc in ['-', 'nan', 'None', '', '0', 'NaT']:
+                new_loc = get_master_data(row['Unit_Name'], map_loc, "-")
+                row['Lokasi'] = new_loc
+            
+            # Fix Capacity
+            curr_cap = pd.to_numeric(row.get('Capacity', 0), errors='coerce')
+            if pd.isna(curr_cap) or curr_cap == 0:
+                new_cap = get_master_data(row['Unit_Name'], map_cap, 0)
+                row['Capacity'] = new_cap
+            else:
+                row['Capacity'] = int(curr_cap + 0.5)
+                
+            return row
+
         if 'Lokasi' not in data_inaktif.columns: data_inaktif['Lokasi'] = "-"
-        data_inaktif['Lokasi'] = data_inaktif.apply(fill_loc, axis=1)
+        if 'Capacity' not in data_inaktif.columns: data_inaktif['Capacity'] = 0
+        
+        data_inaktif = data_inaktif.apply(fix_inaktif_row, axis=1)
 
     return data_kpi, data_unit, data_inaktif
 
 df_kpi, df_unit, df_inaktif = load_data()
 
 # ==============================================================================
-# FUNGSI LOAD DATA TREN (DARI FILE LAPORAN FIX)
+# FUNGSI LOAD DATA TREN (DIPERBAIKI: HANDLE PENAMAAN KHUSUS)
 # ==============================================================================
 @st.cache_data
 def load_monthly_data(unit_name_target):
@@ -89,11 +166,20 @@ def load_monthly_data(unit_name_target):
     try:
         df_trend = pd.read_excel(file_path)
         
+        # [PERBAIKAN UTAMA] Normalisasi Agresif (Hapus Simbol & Standardisasi Kata)
         def normalize(name):
             if pd.isna(name): return ""
             name = str(name).upper().strip()
-            name = re.sub(r'[/\-._]', ' ', name)
-            return " ".join(name.split())
+            
+            # 1. Standardisasi Typo (Misal: FORKLIFT -> FORKLIF)
+            name = name.replace("FORKLIFT", "FORKLIF")
+            
+            # 2. Hapus semua simbol (spasi, /, -, .) hanya sisakan huruf & angka
+            # Contoh: "FORKLIF MITS/KENANGA" -> "FORKLIFMITSKENANGA"
+            # Contoh: "FORKLIFT MITS KENANGA" -> "FORKLIFMITSKENANGA" (Match!)
+            name = re.sub(r'[^A-Z0-9]', '', name)
+            
+            return name
 
         target_clean = normalize(unit_name_target)
         df_trend['Unit_Clean'] = df_trend['Unit'].apply(normalize)
@@ -122,7 +208,7 @@ def load_monthly_data(unit_name_target):
 # ==============================================================================
 if df_inaktif is not None:
     if 'Lokasi' not in df_inaktif.columns: df_inaktif['Lokasi'] = "-"
-    if 'Capacity' not in df_inaktif.columns: df_inaktif['Capacity'] = "-" 
+    # Capacity sudah dihandle di load_data
 
 # ==============================================================================
 # 4. SIDEBAR: NAVIGASI
@@ -212,7 +298,7 @@ if analysis_mode == "Group KPI":
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Populasi", f"{populasi} Unit")
     c2.metric("Total Solar", f"{total_solar:,.0f} Liter")
-    c3.metric("Benchmark (Median)", f"{avg_eff:.2f} L/Jam")
+    c3.metric("Benchmark Median", f"{avg_eff:.2f} L/Jam")
     c4.metric("Estimasi Kerugian", f"Rp {estimasi_rugi_rp:,.0f}", help=f"{total_waste_liter:,.0f} Liter Terbuang")
     
     st.markdown("---")
@@ -268,7 +354,12 @@ if analysis_mode == "Group KPI":
             if not df_trend.empty:
                 fig_trend = px.line(df_trend, x='Bulan', y='Fuel_Ratio', markers=True, title=f"Pergerakan Fuel Ratio {selected_unit_kpi} (Jan-Nov)")
                 
-                # [UPDATE] Posisi Teks Top Left & Background Putih
+                # Auto Scaling Y Axis
+                all_y = df_trend['Fuel_Ratio'].tolist() + [avg_eff]
+                min_y, max_y = min(all_y), max(all_y)
+                padding = (max_y - min_y) * 0.2 if max_y > min_y else (max_y * 0.2 if max_y > 0 else 1.0)
+                fig_trend.update_yaxes(range=[max(0, min_y - padding), max_y + padding])
+
                 fig_trend.add_hline(
                     y=avg_eff, 
                     line_dash="dash", 
@@ -382,18 +473,58 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     jenis_list = sorted(df_unit['Jenis_Alat'].astype(str).unique())
     selected_jenis = st.sidebar.selectbox("1. Pilih Jenis Alat:", jenis_list)
     
-    # 2. Pilih Kapasitas (LOGIKA BARU SESUAI REQUEST)
-    df_jenis_filtered = df_unit[df_unit['Jenis_Alat'] == selected_jenis]
+    # 2. Pilih Kapasitas (LOGIKA DYNAMIC DROPDOWN)
+    
+    df_check_active = df_unit[df_unit['Jenis_Alat'] == selected_jenis].copy()
+    
+    df_check_inactive = pd.DataFrame()
+    if df_inaktif is not None:
+        df_check_inactive = df_inaktif[df_inaktif['Jenis_Alat'] == selected_jenis].copy()
+        
+    def has_data(min_val, max_val=None, exact_val=None):
+        if exact_val is not None:
+            act = (df_check_active['Capacity'] == exact_val).any()
+            inact = (df_check_inactive['Capacity'] == exact_val).any() if not df_check_inactive.empty else False
+            return act or inact
+        else:
+            cond_act = (df_check_active['Capacity'] >= min_val)
+            if max_val is not None:
+                cond_act = cond_act & (df_check_active['Capacity'] < max_val)
+            act = cond_act.any()
+            
+            inact = False
+            if not df_check_inactive.empty:
+                cond_inact = (df_check_inactive['Capacity'] >= min_val)
+                if max_val is not None:
+                    cond_inact = cond_inact & (df_check_inactive['Capacity'] < max_val)
+                inact = cond_inact.any()
+            return act or inact
+
+    # Generate Dropdown Options
     cap_options = []
     
     if selected_jenis in ['FORKLIFT', 'SIDE LOADER']:
-        cap_options = ['Di Bawah 5 Ton', 'Di Bawah 10 Ton', 'Di Bawah 15 Ton']
+        if has_data(0, 5): cap_options.append('Di Bawah 5 Ton')
+        if has_data(5, 10): cap_options.append('Di Bawah 10 Ton')
+        if has_data(10, 15): cap_options.append('Di Bawah 15 Ton')
+        if has_data(15): cap_options.append('15 Ton ke Atas') # Renamed
+        
     elif selected_jenis == 'CRANE':
-        cap_options = ['Di Bawah 100 Ton', 'Di Atas 100 Ton']
+        if has_data(0, 100): cap_options.append('Di Bawah 100 Ton')
+        if has_data(100): cap_options.append('Di Atas 100 Ton')
+        
     elif selected_jenis in ['REACH STACKER', 'TOP LOADER']:
-        cap_options = ['Di Atas 35 Ton']
+        if has_data(35): cap_options.append('Di Atas 35 Ton')
+        
+    elif selected_jenis in ['TRAILER', 'TRONTON']:
+        if has_data(0, exact_val=40): cap_options.append('40 Ton')
+        
     else:
-        cap_options = sorted(df_jenis_filtered['Capacity'].unique().astype(str).tolist())
+        cap_options = sorted(df_check_active['Capacity'].unique().astype(str).tolist())
+        
+    if not cap_options:
+        st.warning(f"Tidak ada data unit (Aktif/Inaktif) untuk jenis {selected_jenis}")
+        st.stop()
         
     selected_cap_filter = st.sidebar.selectbox("2. Pilih Kategori Kapasitas:", cap_options)
     
@@ -405,37 +536,41 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     # --- FILTER FINAL ---
     df_active = pd.DataFrame()
     df_inactive_show = pd.DataFrame()
-    df_jenis_filtered['Capacity'] = pd.to_numeric(df_jenis_filtered['Capacity'], errors='coerce').fillna(0)
     
-    if selected_cap_filter == 'Di Bawah 5 Ton':
-        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 5].copy()
-    elif selected_cap_filter == 'Di Bawah 10 Ton':
-        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 10].copy()
-    elif selected_cap_filter == 'Di Bawah 15 Ton':
-        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 15].copy()
-    elif selected_cap_filter == 'Di Bawah 100 Ton':
-        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] < 100].copy()
-    elif selected_cap_filter == 'Di Atas 100 Ton':
-        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] >= 100].copy()
-    elif selected_cap_filter == 'Di Atas 35 Ton':
-        df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] > 35].copy()
-    else:
-        try:
-             val = float(selected_cap_filter)
-             df_active = df_jenis_filtered[df_jenis_filtered['Capacity'] == val].copy()
-        except:
-             df_active = df_jenis_filtered.copy()
-    
-    # Filter Inaktif Logic
-    if df_inaktif is not None:
-        df_inactive_show = df_inaktif[df_inaktif['Jenis_Alat'] == selected_jenis].copy()
+    def apply_filter(df_target):
+        if df_target.empty: return df_target
+        if selected_cap_filter == 'Di Bawah 5 Ton':
+            return df_target[df_target['Capacity'] < 5]
+        elif selected_cap_filter == 'Di Bawah 10 Ton':
+            return df_target[(df_target['Capacity'] >= 5) & (df_target['Capacity'] < 10)]
+        elif selected_cap_filter == 'Di Bawah 15 Ton':
+            return df_target[(df_target['Capacity'] >= 10) & (df_target['Capacity'] < 15)]
+        elif selected_cap_filter == '15 Ton ke Atas':
+            return df_target[df_target['Capacity'] >= 15]
+        elif selected_cap_filter == 'Di Bawah 100 Ton':
+            return df_target[df_target['Capacity'] < 100]
+        elif selected_cap_filter == 'Di Atas 100 Ton':
+            return df_target[df_target['Capacity'] >= 100]
+        elif selected_cap_filter == 'Di Atas 35 Ton':
+            return df_target[df_target['Capacity'] > 35]
+        elif selected_cap_filter == '40 Ton':
+            return df_target[df_target['Capacity'] == 40]
+        else:
+            try:
+                val = float(selected_cap_filter)
+                return df_target[df_target['Capacity'] == val]
+            except:
+                return df_target
+
+    df_active = apply_filter(df_check_active).copy()
+    df_inactive_show = apply_filter(df_check_inactive).copy()
     
     # --- MAIN CONTENT ---
     st.subheader(f"Analisa: {selected_jenis} - {selected_cap_filter}")
     
     if not df_inactive_show.empty:
         with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa (Inaktif pada jenis ini)"):
-            st.dataframe(df_inactive_show[['Unit_Name', 'Lokasi', 'Total_Liter', 'Total_HM_Work']]
+            st.dataframe(df_inactive_show[['Unit_Name', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work']]
                          .rename(columns={'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Unit_Name': 'Unit'}))
             
     if df_active.empty:
@@ -506,7 +641,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
         st.markdown("### Efisiensi BBM Bulanan Setiap Unit")
         
         # Daftar Unit Aktif
-        list_unit_active = df_display_active['Unit'].unique().tolist()
+        list_unit_active = df_display_active['Unit'].unique().tolist() # Use 'Unit'
         
         if list_unit_active:
             selected_unit_active = st.selectbox("Pilih Unit yang Diinginkan:", list_unit_active, key='sb_active')
@@ -516,7 +651,12 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
             if not df_trend.empty:
                 fig_trend = px.line(df_trend, x='Bulan', y='Fuel_Ratio', markers=True, title=f"Pergerakan Fuel Ratio {selected_unit_active} (Jan-Nov)")
                 
-                # [UPDATE] Posisi Teks Top Left & Background Putih
+                # Auto Scaling Y Axis
+                all_y = df_trend['Fuel_Ratio'].tolist() + [benchmark_val]
+                min_y, max_y = min(all_y), max(all_y)
+                padding = (max_y - min_y) * 0.2 if max_y > min_y else (max_y * 0.2 if max_y > 0 else 1.0)
+                fig_trend.update_yaxes(range=[max(0, min_y - padding), max_y + padding])
+
                 fig_trend.add_hline(
                     y=benchmark_val, 
                     line_dash="dash", 
@@ -543,7 +683,6 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
             labels={'Fuel_Ratio': 'Fuel Ratio'}
         )
         
-        # [UPDATE] Posisi Teks Top Left & Background Putih
         fig_bar.add_hline(
             y=benchmark_val, 
             line_dash="dash",
@@ -552,7 +691,6 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
             annotation_text=f"Benchmark: {benchmark_val:.2f} L/Jam",
             annotation_position="top left",
             annotation_font_color="white",
-            annotation_bgcolor="rgba(0, 0, 0, 0.5)" # Hitam transparan untuk chart background gelap
         )
         
         st.plotly_chart(fig_bar, use_container_width=True)
