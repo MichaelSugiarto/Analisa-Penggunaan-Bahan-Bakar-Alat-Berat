@@ -100,7 +100,7 @@ def load_data():
         try:
             data_unit = pd.read_excel(f, sheet_name='Rapor_Unit_Aktif')
             
-            # Rounding Capacity pada Data Unit Aktif
+            # [UPDATE] Rounding Capacity pada Data Unit Aktif
             if 'Capacity' in data_unit.columns:
                 data_unit['Capacity'] = pd.to_numeric(data_unit['Capacity'], errors='coerce').fillna(0)
                 data_unit['Capacity'] = data_unit['Capacity'].apply(lambda x: int(x + 0.5))
@@ -112,15 +112,17 @@ def load_data():
         except Exception:
             continue
     
-    # 3. ISI DATA KOSONG PADA INAKTIF
+    # 3. PERBAIKAN: ISI DATA KOSONG PADA INAKTIF
     if data_inaktif is not None:
         
         # Helper untuk mencari data
         def get_master_data(unit_name, map_dict, default_val):
+            # Cek 1: Nama Persis
             clean_name = str(unit_name).strip().upper()
             if clean_name in map_dict:
                 return map_dict[clean_name]
             
+            # Cek 2: Nama Super Bersih (Tanpa spasi/simbol)
             super_clean = clean_key(unit_name)
             if super_clean in map_dict:
                 return map_dict[super_clean]
@@ -140,10 +142,12 @@ def load_data():
                 new_cap = get_master_data(row['Unit_Name'], map_cap, 0)
                 row['Capacity'] = new_cap
             else:
+                # Rounding jika ada nilai desimal
                 row['Capacity'] = int(curr_cap + 0.5)
                 
             return row
 
+        # Terapkan Fix baris per baris
         if 'Lokasi' not in data_inaktif.columns: data_inaktif['Lokasi'] = "-"
         if 'Capacity' not in data_inaktif.columns: data_inaktif['Capacity'] = 0
         
@@ -176,7 +180,6 @@ def load_monthly_data(unit_name_target):
             
             # 2. Hapus semua simbol (spasi, /, -, .) hanya sisakan huruf & angka
             # Contoh: "FORKLIF MITS/KENANGA" -> "FORKLIFMITSKENANGA"
-            # Contoh: "FORKLIFT MITS KENANGA" -> "FORKLIFMITSKENANGA" (Match!)
             name = re.sub(r'[^A-Z0-9]', '', name)
             
             return name
@@ -311,7 +314,8 @@ if analysis_mode == "Group KPI":
         
         cols_kpi_show = [c for c in ['Unit', 'Category', 'Total_Solar_Liter', col_durasi, 'Rata_Rata_Efisiensi', 'Status_BBM', 'Potensi_Pemborosan_Liter'] if c in df_view.columns]
         
-        df_display_kpi = df_view[cols_kpi_show].sort_values('Total_Solar_Liter', ascending=False).copy()
+        # [UPDATE] Sort by Fuel_Ratio Ascending (Efisien -> Boros)
+        df_display_kpi = df_view[cols_kpi_show].sort_values('Rata_Rata_Efisiensi', ascending=True).copy()
         
         rename_map_kpi = {
             'Total_Solar_Liter': 'Total_Penggunaan_BBM', 
@@ -582,7 +586,8 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     total_waste = df_active['Potensi_Pemborosan_Liter'].sum()
     total_loss_rp = total_waste * harga_solar
     
-    df_active.sort_values('Fuel_Ratio', inplace=True)
+    # [UPDATE] Sort by Fuel_Ratio Ascending (Efisien -> Boros)
+    df_active.sort_values('Fuel_Ratio', ascending=True, inplace=True)
     best_unit = df_active.iloc[0]
     
     if len(df_active) > 1:
