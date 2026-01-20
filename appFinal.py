@@ -300,8 +300,8 @@ if analysis_mode == "Group KPI":
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Populasi", f"{populasi} Unit")
-    c2.metric("Total Solar", f"{total_solar:,.0f} Liter")
-    c3.metric("Benchmark Median", f"{avg_eff:.2f} L/Jam")
+    c2.metric("Total BBM yang Digunakan", f"{total_solar:,.0f} Liter")
+    c3.metric("Benchmark (Median)", f"{avg_eff:.2f} L/Jam")
     c4.metric("Estimasi Kerugian", f"Rp {estimasi_rugi_rp:,.0f}", help=f"{total_waste_liter:,.0f} Liter Terbuang")
     
     st.markdown("---")
@@ -318,7 +318,7 @@ if analysis_mode == "Group KPI":
         df_display_kpi = df_view[cols_kpi_show].sort_values('Rata_Rata_Efisiensi', ascending=True).copy()
         
         rename_map_kpi = {
-            'Total_Solar_Liter': 'Total_Penggunaan_BBM', 
+            'Total_Solar_Liter': 'Total_Pengisian_BBM', 
             col_durasi: 'Total_Jam_Kerja',
             'Rata_Rata_Efisiensi': 'Fuel_Ratio',
             'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'
@@ -337,7 +337,7 @@ if analysis_mode == "Group KPI":
 
         st.dataframe(
             df_display_kpi.style.format({
-                'Total_Penggunaan_BBM': '{:,.0f}', 
+                'Total_Pengisian_BBM': '{:,.0f}', 
                 'Total_Jam_Kerja': '{:,.0f}', 
                 'Fuel_Ratio': '{:.2f}', 
                 'Potensi_Pemborosan_BBM': '{:,.0f}'
@@ -384,7 +384,7 @@ if analysis_mode == "Group KPI":
         
         labels_map = {
             col_durasi: 'Total_Jam_Kerja',
-            'Total_Solar_Liter': 'Total_Penggunaan_BBM', 
+            'Total_Solar_Liter': 'Total_Pengisian_BBM', 
             'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM',
             'Status_BBM': 'Status_BBM',
             'Unit': 'Unit'
@@ -404,7 +404,7 @@ if analysis_mode == "Group KPI":
             hover_data=hover_data_kpi,
             color_discrete_map=color_map, 
             labels=labels_map, 
-            title="Sebaran Efisiensi Unit"
+            title="Sebaran Efisiensi Setiap Unit"
         )
         st.plotly_chart(fig, use_container_width=True)
         
@@ -573,7 +573,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     st.subheader(f"Analisa: {selected_jenis} - {selected_cap_filter}")
     
     if not df_inactive_show.empty:
-        with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa (Inaktif pada jenis ini)"):
+        with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa"):
             st.dataframe(df_inactive_show[['Unit_Name', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work']]
                          .rename(columns={'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Unit_Name': 'Unit'}))
             
@@ -603,7 +603,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     m1.metric("Populasi Aktif", f"{len(df_active)} Unit")
     m2.metric("Benchmark (Median)", f"{benchmark_val:.2f} L/Jam")
     m3.metric("Estimasi Kerugian", f"Rp {total_loss_rp:,.0f}", help=f"{total_waste:,.0f} Liter Terbuang")
-    m4.metric(f"Teririt: {best_unit['Unit_Name']}", f"{best_unit['Fuel_Ratio']:.2f} L/Jam")
+    m4.metric(f"Unit Teririt: {best_unit['Unit_Name']}", f"{best_unit['Fuel_Ratio']:.2f} L/Jam")
     
     st.markdown("---")
     
@@ -702,7 +702,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
         
     # Tab C: Scatter
     with tab_c:
-        st.subheader("Peta Jam Kerja vs BBM")
+        st.subheader("Jam Kerja vs BBM")
         
         color_map_status = {"EFISIEN": "#2ca02c", "BOROS": "#d62728"}
         
@@ -729,7 +729,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
             },
             color_discrete_map=color_map_status,
             labels=labels_map, 
-            title="Sebaran Efisiensi Unit"
+            title="Sebaran Efisiensi Setiap Unit"
         )
         
         st.plotly_chart(fig_scat, use_container_width=True)
