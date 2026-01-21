@@ -32,8 +32,11 @@ def load_data():
     # Fungsi Pembersih Nama Ekstrem (Hanya Huruf & Angka)
     def clean_key(text):
         if pd.isna(text): return ""
+        text = str(text).upper().strip()
+        # [UPDATE] Fix Typo agar konsisten
+        text = text.replace("FORKLIFT", "FORKLIF")
         # Buang semua simbol & spasi, uppercase
-        return re.sub(r'[^A-Z0-9]', '', str(text).upper())
+        return re.sub(r'[^A-Z0-9]', '', text)
 
     # 0. Load Master Data (cost & bbm 2022 sd 2025.xlsx)
     try:
@@ -55,26 +58,30 @@ def load_data():
                 # Parsing Capacity
                 cap_val = 0
                 
-                # Cara A: Dari Kolom Kapasitas
-                if col_cap_master:
-                    try:
-                        raw_cap = str(row[col_cap_master])
-                        match = re.search(r"(\d+(\.\d+)?)", raw_cap)
-                        if match:
-                            val_float = float(match.group(1))
-                            cap_val = int(val_float + 0.5)
-                    except:
-                        pass
-                
-                # Cara B: Backup dari Nama Unit
-                if cap_val == 0:
-                    try:
-                        match_name = re.search(r"(\d+(\.\d+)?)\s*(T|TON|K)", u_name)
-                        if match_name:
-                            val_float = float(match_name.group(1))
-                            cap_val = int(val_float + 0.5)
-                    except:
-                        pass
+                # [UPDATE: MANUAL FIX KAPASITAS L 9025 US]
+                if u_key == clean_key("L 9025 US"):
+                    cap_val = 40
+                else:
+                    # Cara A: Dari Kolom Kapasitas
+                    if col_cap_master:
+                        try:
+                            raw_cap = str(row[col_cap_master])
+                            match = re.search(r"(\d+(\.\d+)?)", raw_cap)
+                            if match:
+                                val_float = float(match.group(1))
+                                cap_val = int(val_float + 0.5)
+                        except:
+                            pass
+                    
+                    # Cara B: Backup dari Nama Unit
+                    if cap_val == 0:
+                        try:
+                            match_name = re.search(r"(\d+(\.\d+)?)\s*(T|TON|K)", u_name)
+                            if match_name:
+                                val_float = float(match_name.group(1))
+                                cap_val = int(val_float + 0.5)
+                        except:
+                            pass
                 
                 # Simpan ke Map (Key Asli & Key Bersih)
                 if u_name not in map_loc: map_loc[u_name] = loc_val
@@ -95,7 +102,7 @@ def load_data():
         pass
 
     # 2. Load Data Unit Aktif & Inaktif
-    possible_files = ['Benchmark_Per_Alat_Berat_Data_Baru.xlsx']
+    possible_files = ['Benchmark_Per_Alat_Berat_Data_Baru2.xlsx']
     for f in possible_files:
         try:
             data_unit = pd.read_excel(f, sheet_name='Rapor_Unit_Aktif')
@@ -158,10 +165,14 @@ def load_data():
 df_kpi, df_unit, df_inaktif = load_data()
 
 # ==============================================================================
-# FUNGSI LOAD DATA TREN (DIPERBAIKI: HANDLE PENAMAAN KHUSUS)
+# FUNGSI LOAD DATA TREN (UPDATED: SMART MATCHING)
 # ==============================================================================
 @st.cache_data
 def load_monthly_data(unit_name_target):
+    """
+    Mengambil data tren bulanan dengan logika pencocokan cerdas 
+    (Manual Map, EX, Kurung, Exclude) sesuai request.
+    """
     file_path = 'Laporan_Tren_Efisiensi_Bulanan_Fix.xlsx'
     
     if not os.path.exists(file_path):
@@ -170,26 +181,71 @@ def load_monthly_data(unit_name_target):
     try:
         df_trend = pd.read_excel(file_path)
         
-        # [PERBAIKAN UTAMA] Normalisasi Agresif (Hapus Simbol & Standardisasi Kata)
-        def normalize(name):
-            if pd.isna(name): return ""
-            name = str(name).upper().strip()
-            
-            # 1. Standardisasi Typo (Misal: FORKLIFT -> FORKLIF)
-            name = name.replace("FORKLIFT", "FORKLIF")
-            
-            # 2. Hapus semua simbol (spasi, /, -, .) hanya sisakan huruf & angka
-            # Contoh: "FORKLIF MITS/KENANGA" -> "FORKLIFMITSKENANGA"
-            name = re.sub(r'[^A-Z0-9]', '', name)
-            
-            return name
+        # Helper Clean
+        def clean_key_trend(text):
+            if pd.isna(text): return ""
+            text = str(text).upper().strip()
+            text = text.replace("FORKLIFT", "FORKLIF")
+            return re.sub(r'[^A-Z0-9]', '', text)
 
-        target_clean = normalize(unit_name_target)
-        df_trend['Unit_Clean'] = df_trend['Unit'].apply(normalize)
+        target_clean = clean_key_trend(unit_name_target)
         
-        row_data = df_trend[df_trend['Unit_Clean'] == target_clean]
+        # --- FUNGSI MATCHING BARIS PER BARIS ---
+        def is_match(row_unit_name):
+            raw_name = str(row_unit_name).strip().upper()
+            
+            # 1. EXCLUDE JUNK
+            if raw_name.startswith(('GENSET', 'KOMPRESSOR', 'MESIN', 'TANGKI', 'SPBU', 'MOBIL')):
+                return False
+            
+            clean_row_id = clean_key_trend(raw_name)
+            
+            # 2. MANUAL MAPPING (PRIORITAS)
+            # FL RENTAL
+            if "FL RENTAL 01" in raw_name and "TIMIKA" not in raw_name:
+                if target_clean == clean_key_trend("FL RENTAL 01 TIMIKA"): return True
+            # TOBATI
+            elif "TOBATI" in raw_name and "KALMAR 32T" in raw_name:
+                if target_clean == clean_key_trend("TOP LOADER KALMAR 35T/TOBATI"): return True
+            # L 8477 UUC
+            elif "L 8477 UUC" in raw_name:
+                if target_clean == clean_key_trend("L 9902 UR / S75"): return True
+            # L 9054 UT
+            elif "L 9054 UT" in raw_name:
+                if target_clean == clean_key_trend("L 9054 UT"): return True
+
+            # 3. EXACT MATCH (CLEAN)
+            if clean_row_id == target_clean:
+                return True
+                
+            # 4. LOGIKA SEBELUM KURUNG " ("
+            if " (" in raw_name:
+                try:
+                    part_before = raw_name.split(" (")[0].strip()
+                    if clean_key_trend(part_before) == target_clean: return True
+                except: pass
+
+            # 5. LOGIKA SETELAH "EX."
+            if "EX." in raw_name:
+                try:
+                    part_after_ex = raw_name.split("EX.")[-1].replace(")", "").strip()
+                    clean_after = clean_key_trend(part_after_ex)
+                    
+                    if clean_after == target_clean: return True
+                    # Partial Match
+                    if clean_after and clean_after in target_clean: return True
+                except: pass
+                
+            return False
+
+        # Terapkan Filter
+        mask = df_trend['Unit'].apply(is_match)
+        row_data = df_trend[mask]
         
         if not row_data.empty:
+            # Ambil yang pertama jika ada duplikat
+            row_data = row_data.iloc[[0]]
+            
             month_cols = [c for c in df_trend.columns if str(c).startswith('2025')]
             
             df_melt = row_data.melt(
@@ -575,7 +631,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
     if not df_inactive_show.empty:
         with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa"):
             st.dataframe(df_inactive_show[['Unit_Name', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work']]
-                         .rename(columns={'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Unit_Name': 'Unit'}))
+                          .rename(columns={'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Unit_Name': 'Unit'}))
             
     if df_active.empty:
         st.warning(f"Tidak ada unit aktif untuk kategori {selected_jenis} {selected_cap_filter}.")
@@ -628,7 +684,7 @@ elif analysis_mode == "Jenis Alat & Kapasitas":
         df_display_active.rename(columns=rename_map_active, inplace=True)
 
         def highlight_status(row):
-            color = '#2ca02c' if row['Status_BBM'] == 'EFISIEN' else '#d62728' 
+            color = '#2ca02c' if row['Status_BBM'] == 'EFISIEN' else ('#d62728' if row['Status_BBM'] == 'BOROS' else '')
             return [f'background-color: {color}; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
 
         st.dataframe(
