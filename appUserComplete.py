@@ -26,8 +26,8 @@ st.title("Dashboard Monitoring Efisiensi BBM Alat Berat")
 st.sidebar.title("Input Data Untuk Analisa")
 st.sidebar.caption("Program akan memproses data menjadi Laporan Benchmark dan Laporan Tren Bulanan")
 
-master_file = st.sidebar.file_uploader("1. Upload Master Data (Excel)", type=['xlsx'])
-bbm_file = st.sidebar.file_uploader("2. Upload Transaksi BBM Mentah (BBM AAB.xlsx)", type=['xlsx'])
+master_file = st.sidebar.file_uploader("1. Upload Data HP (cost & bbm 2022 sd 2025 HP.xlsx)", type=['xlsx'])
+bbm_file = st.sidebar.file_uploader("2. Upload Data HM & Penggunaan BBM (BBM AAB.xlsx)", type=['xlsx'])
 
 mulai_proses = st.sidebar.button("Mulai Proses Analisa", type="primary", use_container_width=True)
 
