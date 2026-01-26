@@ -26,8 +26,8 @@ st.title("Dashboard Monitoring Efisiensi BBM Alat Berat")
 st.sidebar.title("Input Data Untuk Analisa")
 st.sidebar.caption("Program akan memproses data menjadi Laporan Benchmark dan Laporan Tren Bulanan")
 
-master_file = st.sidebar.file_uploader("1. Upload Data HP (cost & bbm 2022 sd 2025 HP.xlsx)", type=['xlsx'])
-bbm_file = st.sidebar.file_uploader("2. Upload Data HM & Penggunaan BBM (BBM AAB.xlsx)", type=['xlsx'])
+master_file = st.sidebar.file_uploader("1. Upload Master Data (Excel)", type=['xlsx'])
+bbm_file = st.sidebar.file_uploader("2. Upload Transaksi BBM Mentah (BBM AAB.xlsx)", type=['xlsx'])
 
 mulai_proses = st.sidebar.button("Mulai Proses Analisa", type="primary", use_container_width=True)
 
@@ -300,7 +300,7 @@ if df_unit is not None:
                 lambda x: "None" if pd.isna(x) or x == 0 else f"{float(x):.2f}"
             )
             
-            # [UPDATE] Logika Fuel Ratio, Pemborosan, & Status BBM untuk Unit Inaktif
+            # Logika Fuel Ratio & Pemborosan untuk Unit Inaktif
             def format_fuel_ratio(row):
                 if row['Status'] == 'INAKTIF': return "UNIT INAKTIF"
                 return f"{float(row['Fuel_Ratio']):.2f}"
@@ -315,7 +315,7 @@ if df_unit is not None:
 
             df_search_display['Fuel_Ratio'] = df_search_display.apply(format_fuel_ratio, axis=1)
             df_search_display['Potensi_Pemborosan_Liter'] = df_search_display.apply(format_pemborosan, axis=1)
-            df_search_display['Performance_Status'] = df_search_display.apply(format_status_bbm, axis=1) # [UPDATE] Diterapkan disini
+            df_search_display['Performance_Status'] = df_search_display.apply(format_status_bbm, axis=1) 
             
             rename_map_search = {'Unit_Name': 'Unit', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
             df_search_display.rename(columns=rename_map_search, inplace=True)
@@ -434,8 +434,9 @@ if df_unit is not None:
     with tab_b:
         st.subheader("Peringkat Efisiensi Setiap Unit")
         df_plot_bar = df_active.rename(columns={'Unit_Name': 'Unit'})
+        # [UPDATE] Menambahkan hover_data=['Lokasi']
         fig_bar = px.bar(df_plot_bar, x='Unit', y='Fuel_Ratio', color='Fuel_Ratio', color_continuous_scale='RdYlGn_r', text_auto='.2f', 
-                         title=f"Konsumsi BBM (Liter/Jam)", labels={'Fuel_Ratio': 'Fuel Ratio'})
+                         title=f"Konsumsi BBM (Liter/Jam)", labels={'Fuel_Ratio': 'Fuel Ratio', 'Lokasi': 'Lokasi'}, hover_data=['Lokasi'])
         fig_bar.add_hline(y=benchmark_val, line_dash="dash", line_color="white", line_width=2, annotation_text=f"Benchmark: {benchmark_val:.2f} L/Jam", annotation_position="top left", annotation_font_color="white")
         st.plotly_chart(fig_bar, use_container_width=True)
         
@@ -443,9 +444,11 @@ if df_unit is not None:
     with tab_c:
         st.subheader("Jam Kerja vs BBM")
         color_map_status = {"EFISIEN": "#2ca02c", "BOROS": "#d62728"}
-        labels_map = {'Total_HM_Work': 'Total_Jam_Kerja', 'Total_Liter': 'Total_Pengisian_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM', 'Performance_Status': 'Status_BBM', 'Unit_Name': 'Unit'}
+        # [UPDATE] Menambahkan 'Lokasi' ke labels_map
+        labels_map = {'Total_HM_Work': 'Total_Jam_Kerja', 'Total_Liter': 'Total_Pengisian_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM', 'Performance_Status': 'Status_BBM', 'Unit_Name': 'Unit', 'Lokasi': 'Lokasi'}
 
-        fig_scat = px.scatter(df_active, x='Total_HM_Work', y='Total_Liter', color='Performance_Status', size='Total_Liter', hover_name='Unit_Name', hover_data={'Performance_Status': False, 'Fuel_Ratio': ':.2f', 'Potensi_Pemborosan_Liter': ':,.0f'}, color_discrete_map=color_map_status, labels=labels_map, title="Sebaran Efisiensi Setiap Unit")
+        # [UPDATE] Menambahkan 'Lokasi': True pada hover_data
+        fig_scat = px.scatter(df_active, x='Total_HM_Work', y='Total_Liter', color='Performance_Status', size='Total_Liter', hover_name='Unit_Name', hover_data={'Performance_Status': False, 'Fuel_Ratio': ':.2f', 'Potensi_Pemborosan_Liter': ':,.0f', 'Lokasi': True}, color_discrete_map=color_map_status, labels=labels_map, title="Sebaran Efisiensi Setiap Unit")
         st.plotly_chart(fig_scat, use_container_width=True)
 
     # Tab D: Analisa Pemborosan
@@ -456,7 +459,8 @@ if df_unit is not None:
         
         if not df_boros.empty:
             df_boros.sort_values('Potensi_Pemborosan_BBM', ascending=True, inplace=True)
-            fig_waste = px.bar(df_boros.tail(10), x='Potensi_Pemborosan_BBM', y='Unit', orientation='h', title="Unit dengan Potensi Pemborosan Tertinggi (Liter)", text_auto='.0f', color_discrete_sequence=['#c0392b'], labels={'Potensi_Pemborosan_BBM': 'Potensi Pemborosan BBM (Liter)'})
+            # [UPDATE] Menambahkan hover_data=['Lokasi']
+            fig_waste = px.bar(df_boros.tail(10), x='Potensi_Pemborosan_BBM', y='Unit', orientation='h', title="Unit dengan Potensi Pemborosan Tertinggi (Liter)", text_auto='.0f', color_discrete_sequence=['#c0392b'], labels={'Potensi_Pemborosan_BBM': 'Potensi Pemborosan BBM (Liter)', 'Lokasi': 'Lokasi'}, hover_data=['Lokasi'])
             st.plotly_chart(fig_waste, use_container_width=True)
         else:
             st.success("Tidak ada unit yang terindikasi boros dalam kategori ini.")
