@@ -269,15 +269,32 @@ def format_capacity_with_unit(row):
 # ==============================================================================
 if df_unit is not None:
     # --- PENCARIAN UNIT ---
-    st.subheader("Cari Unit Spesifik")
-    search_unit = st.text_input("Ketik Nama Unit:", key="search_unit", placeholder="Cari unit...").upper()
-    if search_unit:
-        res_active = df_unit[df_unit['Unit_Name'].astype(str).str.contains(search_unit, na=False)].copy()
+    st.subheader("Cari Data Spesifik")
+    
+    # [UPDATE] Dropdown Pemilihan Kategori
+    search_category = st.selectbox("Pilih Kategori Pencarian:", ["Nama Unit", "Lokasi", "Jenis Alat"])
+    
+    # [UPDATE] Input Pencarian
+    search_keyword = st.text_input(f"Ketik {search_category}:", key="search_keyword", placeholder=f"Cari {search_category}...").upper()
+    
+    if search_keyword:
+        # [UPDATE] Logika Filter Berdasarkan Kategori
+        if search_category == "Nama Unit":
+            mask_active = df_unit['Unit_Name'].astype(str).str.contains(search_keyword, na=False)
+            mask_inactive = df_inaktif['Unit_Name'].astype(str).str.contains(search_keyword, na=False) if df_inaktif is not None else pd.Series([False] * len(df_unit))
+        elif search_category == "Lokasi":
+            mask_active = df_unit['Lokasi'].astype(str).str.contains(search_keyword, na=False)
+            mask_inactive = df_inaktif['Lokasi'].astype(str).str.contains(search_keyword, na=False) if df_inaktif is not None else pd.Series([False] * len(df_unit))
+        else: # Jenis Alat
+            mask_active = df_unit['Jenis_Alat'].astype(str).str.contains(search_keyword, na=False)
+            mask_inactive = df_inaktif['Jenis_Alat'].astype(str).str.contains(search_keyword, na=False) if df_inaktif is not None else pd.Series([False] * len(df_unit))
+
+        res_active = df_unit[mask_active].copy()
         res_active['Status'] = 'AKTIF'
         
         res_inactive = pd.DataFrame()
         if df_inaktif is not None:
-            res_inactive = df_inaktif[df_inaktif['Unit_Name'].astype(str).str.contains(search_unit, na=False)].copy()
+            res_inactive = df_inaktif[mask_inactive].copy()
             res_inactive['Status'] = 'INAKTIF'
             
         res_all = pd.concat([res_active, res_inactive], ignore_index=True)
@@ -302,11 +319,11 @@ if df_unit is not None:
             
             # Logika Fuel Ratio & Pemborosan untuk Unit Inaktif
             def format_fuel_ratio(row):
-                if row['Status'] == 'INAKTIF': return "UNIT INAKTIF"
+                if row['Status'] == 'INAKTIF': return "Tidak Ada Karena Unit Inaktif"
                 return f"{float(row['Fuel_Ratio']):.2f}"
 
             def format_pemborosan(row):
-                if row['Status'] == 'INAKTIF': return "UNIT INAKTIF"
+                if row['Status'] == 'INAKTIF': return "Tidak Ada Karena Unit Inaktif"
                 return f"{float(row['Potensi_Pemborosan_Liter']):,.0f}"
 
             def format_status_bbm(row):
