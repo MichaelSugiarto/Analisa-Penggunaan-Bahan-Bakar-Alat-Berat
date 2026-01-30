@@ -271,116 +271,128 @@ if df_unit is not None:
     # --- PENCARIAN UNIT ---
     st.subheader("Cari Data Spesifik")
     
-    # [UPDATE] Dropdown Pemilihan Kategori
-    search_category = st.selectbox("Pilih Kategori Pencarian:", ["Nama Unit", "Lokasi", "Jenis Alat"])
+    # [UPDATE] Dropdown Pemilihan Kategori (Menghapus Lokasi & Jenis Alat)
+    search_category = st.selectbox("Pilih Kategori Pencarian:", ["Nama Unit", "Horse Power"])
     
-    # [UPDATE] Input Pencarian
+    # Input Pencarian
     search_keyword = st.text_input(f"Ketik {search_category}:", key="search_keyword", placeholder=f"Cari {search_category}...").upper()
     
     if search_keyword:
-        # [UPDATE] Logika Filter Berdasarkan Kategori
+        mask_active = pd.Series([False] * len(df_unit))
+        mask_inactive = pd.Series([False] * (len(df_inaktif) if df_inaktif is not None else 0))
+        valid_search = True
+
+        # [UPDATE] Logika Filter Hanya untuk Nama Unit & HP
         if search_category == "Nama Unit":
             mask_active = df_unit['Unit_Name'].astype(str).str.contains(search_keyword, na=False)
-            mask_inactive = df_inaktif['Unit_Name'].astype(str).str.contains(search_keyword, na=False) if df_inaktif is not None else pd.Series([False] * len(df_unit))
-        elif search_category == "Lokasi":
-            mask_active = df_unit['Lokasi'].astype(str).str.contains(search_keyword, na=False)
-            mask_inactive = df_inaktif['Lokasi'].astype(str).str.contains(search_keyword, na=False) if df_inaktif is not None else pd.Series([False] * len(df_unit))
-        else: # Jenis Alat
-            mask_active = df_unit['Jenis_Alat'].astype(str).str.contains(search_keyword, na=False)
-            mask_inactive = df_inaktif['Jenis_Alat'].astype(str).str.contains(search_keyword, na=False) if df_inaktif is not None else pd.Series([False] * len(df_unit))
+            if df_inaktif is not None: mask_inactive = df_inaktif['Unit_Name'].astype(str).str.contains(search_keyword, na=False)
+        elif search_category == "Horse Power":
+            try:
+                float(search_keyword) # Validasi angka
+                mask_active = df_unit['Horse_Power'].astype(str).str.contains(search_keyword, na=False)
+                if df_inaktif is not None: mask_inactive = df_inaktif['Horse_Power'].astype(str).str.contains(search_keyword, na=False)
+            except ValueError:
+                st.warning("⚠️ Untuk pencarian Horse Power, mohon masukkan angka.")
+                valid_search = False
 
-        res_active = df_unit[mask_active].copy()
-        res_active['Status'] = 'AKTIF'
-        
-        res_inactive = pd.DataFrame()
-        if df_inaktif is not None:
-            res_inactive = df_inaktif[mask_inactive].copy()
-            res_inactive['Status'] = 'INAKTIF'
+        if valid_search:
+            res_active = df_unit[mask_active].copy()
+            res_active['Status'] = 'AKTIF'
             
-        res_all = pd.concat([res_active, res_inactive], ignore_index=True)
-        
-        if not res_all.empty:
-            st.info(f"Ditemukan {len(res_all)} Unit:")
-            if 'Fuel_Ratio' in res_all.columns: res_all.sort_values(by='Fuel_Ratio', ascending=False, inplace=True)
+            res_inactive = pd.DataFrame()
+            if df_inaktif is not None:
+                res_inactive = df_inaktif[mask_inactive].copy()
+                res_inactive['Status'] = 'INAKTIF'
+                
+            res_all = pd.concat([res_active, res_inactive], ignore_index=True)
             
-            cols_to_show = ['Unit_Name', 'Jenis_Alat', 'Status', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Group_Benchmark_Median', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']
-            for c in cols_to_show:
-                if c not in res_all.columns: res_all[c] = 0 if c in ['Total_Liter', 'Total_HM_Work', 'Fuel_Ratio', 'Potensi_Pemborosan_Liter', 'Group_Benchmark_Median'] else "-"
-            
-            df_search_display = res_all[cols_to_show].copy()
-            
-            # Penyesuaian Teks Untuk Unit Inaktif dan Nilai Benchmark
-            df_search_display['Capacity'] = df_search_display.apply(format_capacity_with_unit, axis=1)
-            
-            # Logika Benchmark: Jika NaN/0, maka "None". Jika ada, tampilkan angkanya.
-            df_search_display['Group_Benchmark_Median'] = df_search_display['Group_Benchmark_Median'].apply(
-                lambda x: "None" if pd.isna(x) or x == 0 else f"{float(x):.2f}"
-            )
-            
-            # Logika Fuel Ratio & Pemborosan untuk Unit Inaktif
-            def format_fuel_ratio(row):
-                if row['Status'] == 'INAKTIF': return "Tidak Ada Karena Unit Inaktif"
-                return f"{float(row['Fuel_Ratio']):.2f}"
+            if not res_all.empty:
+                st.info(f"Ditemukan {len(res_all)} Unit:")
+                if 'Fuel_Ratio' in res_all.columns: res_all.sort_values(by='Fuel_Ratio', ascending=False, inplace=True)
+                
+                cols_to_show = ['Unit_Name', 'Jenis_Alat', 'Status', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Group_Benchmark_Median', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']
+                for c in cols_to_show:
+                    if c not in res_all.columns: res_all[c] = 0 if c in ['Total_Liter', 'Total_HM_Work', 'Fuel_Ratio', 'Potensi_Pemborosan_Liter', 'Group_Benchmark_Median'] else "-"
+                
+                df_search_display = res_all[cols_to_show].copy()
+                
+                # Penyesuaian Teks Untuk Unit Inaktif dan Nilai Benchmark
+                df_search_display['Capacity'] = df_search_display.apply(format_capacity_with_unit, axis=1)
+                
+                df_search_display['Group_Benchmark_Median'] = df_search_display['Group_Benchmark_Median'].apply(
+                    lambda x: "None" if pd.isna(x) or x == 0 else f"{float(x):.2f}"
+                )
+                
+                def format_fuel_ratio(row):
+                    if row['Status'] == 'INAKTIF': return "Tidak Ada Karena Unit Inaktif"
+                    return f"{float(row['Fuel_Ratio']):.2f}"
 
-            def format_pemborosan(row):
-                if row['Status'] == 'INAKTIF': return "Tidak Ada Karena Unit Inaktif"
-                return f"{float(row['Potensi_Pemborosan_Liter']):,.0f}"
+                def format_pemborosan(row):
+                    if row['Status'] == 'INAKTIF': return "Tidak Ada Karena Unit Inaktif"
+                    return f"{float(row['Potensi_Pemborosan_Liter']):,.0f}"
 
-            def format_status_bbm(row):
-                if row['Status'] == 'INAKTIF': return "UNIT INAKTIF"
-                return row['Performance_Status']
+                def format_status_bbm(row):
+                    if row['Status'] == 'INAKTIF': return "UNIT INAKTIF"
+                    return row['Performance_Status']
 
-            df_search_display['Fuel_Ratio'] = df_search_display.apply(format_fuel_ratio, axis=1)
-            df_search_display['Potensi_Pemborosan_Liter'] = df_search_display.apply(format_pemborosan, axis=1)
-            df_search_display['Performance_Status'] = df_search_display.apply(format_status_bbm, axis=1) 
-            
-            rename_map_search = {'Unit_Name': 'Unit', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
-            df_search_display.rename(columns=rename_map_search, inplace=True)
+                df_search_display['Fuel_Ratio'] = df_search_display.apply(format_fuel_ratio, axis=1)
+                df_search_display['Potensi_Pemborosan_Liter'] = df_search_display.apply(format_pemborosan, axis=1)
+                df_search_display['Performance_Status'] = df_search_display.apply(format_status_bbm, axis=1) 
+                
+                rename_map_search = {'Unit_Name': 'Unit', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
+                df_search_display.rename(columns=rename_map_search, inplace=True)
 
-            def highlight_search(row):
-                status_bbm = str(row['Status_BBM']).upper()
-                color = '#2ca02c' if status_bbm == 'EFISIEN' else ('#d62728' if status_bbm == 'BOROS' else '')
-                return [f'background-color: {color}; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+                def highlight_search(row):
+                    status_bbm = str(row['Status_BBM']).upper()
+                    color = '#2ca02c' if status_bbm == 'EFISIEN' else ('#d62728' if status_bbm == 'BOROS' else '')
+                    return [f'background-color: {color}; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
 
-            st.dataframe(df_search_display.style.format({'Horse_Power': '{:.0f}', 'Total_Pengisian_BBM': '{:,.0f}', 'Total_Jam_Kerja': '{:,.0f}'}).apply(highlight_search, axis=1))
-        else:
-            st.warning("Unit Tidak Ditemukan.")
+                st.dataframe(df_search_display.style.format({'Horse_Power': '{:.0f}', 'Total_Pengisian_BBM': '{:,.0f}', 'Total_Jam_Kerja': '{:,.0f}'}).apply(highlight_search, axis=1))
+            else:
+                st.warning("Unit Tidak Ditemukan.")
 
     st.markdown("---")
 
     # --- Sidebar Filters ---
-    st.sidebar.subheader("Filter Benchmark")
+    st.sidebar.subheader("Filter Dashboard")
 
-    hp_active = df_unit['Horse_Power'].dropna().unique().tolist()
-    hp_inactive = df_inaktif['Horse_Power'].dropna().unique().tolist() if df_inaktif is not None and not df_inaktif.empty else []
-    all_hp = sorted(list(set(hp_active + hp_inactive)))
+    loc_options = ["Semua"] + sorted(df_unit['Lokasi'].unique().tolist())
+    selected_loc = st.sidebar.selectbox("Pilih Lokasi:", loc_options)
 
-    hp_options = [f"{int(hp)} HP" for hp in all_hp if hp > 0]
-    selected_hp_str = st.sidebar.selectbox("1. Pilih Kategori HP (Horse Power):", hp_options)
-    selected_hp_val = float(selected_hp_str.replace(" HP", ""))
+    type_options = ["Semua"] + sorted(df_unit['Jenis_Alat'].unique().tolist())
+    selected_type = st.sidebar.selectbox("Pilih Jenis Alat:", type_options)
 
     st.sidebar.subheader("Biaya Bahan Bakar")
     harga_solar = st.sidebar.number_input("Harga Solar (IDR):", value=6800, step=100, key='solar_alat')
 
-    # --- FILTER FINAL BERDASARKAN HP SAJA ---
-    df_active = df_unit[df_unit['Horse_Power'] == selected_hp_val].copy()
-    df_inactive_show = df_inaktif[df_inaktif['Horse_Power'] == selected_hp_val].copy() if df_inaktif is not None and not df_inaktif.empty else pd.DataFrame()
+    # --- FILTER FINAL BERDASARKAN LOKASI & JENIS ---
+    df_active = df_unit.copy()
+    df_inactive_show = df_inaktif.copy() if df_inaktif is not None else pd.DataFrame()
+
+    if selected_loc != "Semua":
+        df_active = df_active[df_active['Lokasi'] == selected_loc]
+        if not df_inactive_show.empty:
+            df_inactive_show = df_inactive_show[df_inactive_show['Lokasi'] == selected_loc]
+
+    if selected_type != "Semua":
+        df_active = df_active[df_active['Jenis_Alat'] == selected_type]
+        if not df_inactive_show.empty:
+            df_inactive_show = df_inactive_show[df_inactive_show['Jenis_Alat'] == selected_type]
 
     # --- MAIN CONTENT ---
-    st.subheader(f"Analisa Kategori: {selected_hp_str}")
+    st.subheader(f"Analisa Kategori: {selected_loc} - {selected_type}")
 
     if not df_inactive_show.empty:
-        with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa"):
+        with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa (Inaktif)"):
             df_inactive_display = df_inactive_show[['Unit_Name', 'Jenis_Alat', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work']].copy()
             df_inactive_display['Capacity'] = df_inactive_display.apply(format_capacity_with_unit, axis=1)
             st.dataframe(df_inactive_display.rename(columns={'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Unit_Name': 'Unit'}))
             
     if df_active.empty:
-        st.warning(f"Tidak ada unit aktif untuk kategori {selected_hp_str}.")
+        st.warning(f"Tidak ada unit aktif untuk kategori {selected_loc} - {selected_type}.")
         st.stop()
 
     # --- KPI CALCULATIONS ---
-    benchmark_val = df_active['Group_Benchmark_Median'].iloc[0] if 'Group_Benchmark_Median' in df_active.columns else 0
     total_waste = df_active['Potensi_Pemborosan_Liter'].sum()
     total_loss_rp = total_waste * harga_solar
 
@@ -394,11 +406,10 @@ if df_unit is not None:
     else: worst_txt = "-"; worst_val = ""
 
     # --- METRICS ---
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Populasi Aktif", f"{len(df_active)} Unit")
-    m2.metric("Benchmark (Median)", f"{benchmark_val:.2f} L/Jam")
-    m3.metric("Estimasi Kerugian", f"Rp {total_loss_rp:,.0f}", help=f"{total_waste:,.0f} Liter Terbuang")
-    m4.metric(f"Unit Teririt: {best_unit['Unit_Name']}", f"{best_unit['Fuel_Ratio']:.2f} L/Jam")
+    m2.metric("Estimasi Kerugian", f"Rp {total_loss_rp:,.0f}", help=f"{total_waste:,.0f} Liter Terbuang")
+    m3.metric(f"Unit Teririt: {best_unit['Unit_Name']}", f"{best_unit['Fuel_Ratio']:.2f} L/Jam")
 
     st.markdown("---")
 
@@ -410,18 +421,18 @@ if df_unit is not None:
         st.subheader("Detail Unit Aktif")
         st.info(f"**Total Pemborosan**: **{total_waste:,.0f} Liter** setara dengan **Rp {total_loss_rp:,.0f}**")
         
-        df_display_active = df_active[['Unit_Name', 'Jenis_Alat', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']].copy()
+        df_display_active = df_active[['Unit_Name', 'Jenis_Alat', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Group_Benchmark_Median', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']].copy()
         df_display_active.sort_values(by='Fuel_Ratio', ascending=False, inplace=True)
         df_display_active['Capacity'] = df_display_active.apply(format_capacity_with_unit, axis=1)
         
-        rename_map_active = {'Unit_Name': 'Unit', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
+        rename_map_active = {'Unit_Name': 'Unit', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
         df_display_active.rename(columns=rename_map_active, inplace=True)
 
         def highlight_status(row):
             color = '#2ca02c' if row['Status_BBM'] == 'EFISIEN' else ('#d62728' if row['Status_BBM'] == 'BOROS' else '')
             return [f'background-color: {color}; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
 
-        st.dataframe(df_display_active.style.format({'Horse_Power': '{:.0f}', 'Total_Pengisian_BBM': '{:,.0f}', 'Total_Jam_Kerja': '{:,.0f}', 'Fuel_Ratio': '{:.2f}', 'Potensi_Pemborosan_BBM': '{:,.0f}'}).apply(highlight_status, axis=1))
+        st.dataframe(df_display_active.style.format({'Horse_Power': '{:.0f}', 'Total_Pengisian_BBM': '{:,.0f}', 'Total_Jam_Kerja': '{:,.0f}', 'Fuel_Ratio': '{:.2f}', 'Benchmark': '{:.2f}', 'Potensi_Pemborosan_BBM': '{:,.0f}'}).apply(highlight_status, axis=1))
         
         st.markdown("---")
         st.markdown("### Efisiensi BBM Bulanan Setiap Unit")
@@ -432,17 +443,19 @@ if df_unit is not None:
             selected_unit_active = st.selectbox("Pilih Unit yang Diinginkan:", list_unit_active, key='sb_active')
             df_trend_filtered = df_trend_global[df_trend_global['Unit_Name'] == selected_unit_active]
             
+            unit_benchmark = df_active[df_active['Unit_Name'] == selected_unit_active]['Group_Benchmark_Median'].iloc[0] if not df_active[df_active['Unit_Name'] == selected_unit_active].empty else 0
+
             if not df_trend_filtered.empty:
                 fig_trend = px.line(df_trend_filtered, x='Bulan', y='Fuel_Ratio', markers=True, 
                                     title=f"Pergerakan Fuel Ratio {selected_unit_active} (Bulanan)",
                                     labels={'Bulan': 'Bulan', 'Fuel_Ratio': 'Fuel Ratio'})
                 
-                all_y = df_trend_filtered['Fuel_Ratio'].tolist() + [benchmark_val]
+                all_y = df_trend_filtered['Fuel_Ratio'].tolist() + [unit_benchmark]
                 min_y, max_y = min(all_y), max(all_y)
                 padding = (max_y - min_y) * 0.2 if max_y > min_y else (max_y * 0.2 if max_y > 0 else 1.0)
                 fig_trend.update_yaxes(range=[max(0, min_y - padding), max_y + padding])
 
-                fig_trend.add_hline(y=benchmark_val, line_dash="dash", line_color="red", annotation_text=f"Benchmark: {benchmark_val:.2f} L/Jam", annotation_position="top left", annotation_font_color="white")
+                fig_trend.add_hline(y=unit_benchmark, line_dash="dash", line_color="red", annotation_text=f"Benchmark: {unit_benchmark:.2f} L/Jam", annotation_position="top left", annotation_font_color="white")
                 st.plotly_chart(fig_trend, use_container_width=True)
             else:
                 st.warning("Data tren bulanan tidak tersedia untuk unit ini.")
@@ -451,21 +464,18 @@ if df_unit is not None:
     with tab_b:
         st.subheader("Peringkat Efisiensi Setiap Unit")
         df_plot_bar = df_active.rename(columns={'Unit_Name': 'Unit'})
-        # [UPDATE] Menambahkan hover_data=['Lokasi']
+        
         fig_bar = px.bar(df_plot_bar, x='Unit', y='Fuel_Ratio', color='Fuel_Ratio', color_continuous_scale='RdYlGn_r', text_auto='.2f', 
                          title=f"Konsumsi BBM (Liter/Jam)", labels={'Fuel_Ratio': 'Fuel Ratio', 'Lokasi': 'Lokasi'}, hover_data=['Lokasi'])
-        fig_bar.add_hline(y=benchmark_val, line_dash="dash", line_color="white", line_width=2, annotation_text=f"Benchmark: {benchmark_val:.2f} L/Jam", annotation_position="top left", annotation_font_color="white")
         st.plotly_chart(fig_bar, use_container_width=True)
         
     # Tab C: Scatter
     with tab_c:
         st.subheader("Jam Kerja vs BBM")
         color_map_status = {"EFISIEN": "#2ca02c", "BOROS": "#d62728"}
-        # [UPDATE] Menambahkan 'Lokasi' ke labels_map
         labels_map = {'Total_HM_Work': 'Total_Jam_Kerja', 'Total_Liter': 'Total_Pengisian_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM', 'Performance_Status': 'Status_BBM', 'Unit_Name': 'Unit', 'Lokasi': 'Lokasi'}
 
-        # [UPDATE] Menambahkan 'Lokasi': True pada hover_data
-        fig_scat = px.scatter(df_active, x='Total_HM_Work', y='Total_Liter', color='Performance_Status', size='Total_Liter', hover_name='Unit_Name', hover_data={'Performance_Status': False, 'Fuel_Ratio': ':.2f', 'Potensi_Pemborosan_Liter': ':,.0f', 'Lokasi': True}, color_discrete_map=color_map_status, labels=labels_map, title="Sebaran Efisiensi Setiap Unit")
+        fig_scat = px.scatter(df_active, x='Total_HM_Work', y='Total_Liter', color='Performance_Status', size='Total_Liter', hover_name='Unit_Name', hover_data={'Performance_Status': False, 'Total_HM_Work': False, 'Total_Liter': False, 'Fuel_Ratio': ':.2f', 'Potensi_Pemborosan_Liter': ':,.0f', 'Lokasi': True}, color_discrete_map=color_map_status, labels=labels_map, title="Sebaran Efisiensi Setiap Unit")
         st.plotly_chart(fig_scat, use_container_width=True)
 
     # Tab D: Analisa Pemborosan
@@ -476,7 +486,6 @@ if df_unit is not None:
         
         if not df_boros.empty:
             df_boros.sort_values('Potensi_Pemborosan_BBM', ascending=True, inplace=True)
-            # [UPDATE] Menambahkan hover_data=['Lokasi']
             fig_waste = px.bar(df_boros.tail(10), x='Potensi_Pemborosan_BBM', y='Unit', orientation='h', title="Unit dengan Potensi Pemborosan Tertinggi (Liter)", text_auto='.0f', color_discrete_sequence=['#c0392b'], labels={'Potensi_Pemborosan_BBM': 'Potensi Pemborosan BBM (Liter)', 'Lokasi': 'Lokasi'}, hover_data=['Lokasi'])
             st.plotly_chart(fig_waste, use_container_width=True)
         else:
