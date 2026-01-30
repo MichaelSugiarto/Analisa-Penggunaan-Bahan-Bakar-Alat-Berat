@@ -26,7 +26,7 @@ st.title("Dashboard Monitoring Efisiensi BBM Alat Berat")
 st.sidebar.title("Input Data Untuk Analisa")
 st.sidebar.caption("Program akan memproses data menjadi Laporan Benchmark dan Laporan Tren Bulanan")
 
-master_file = st.sidebar.file_uploader("1. Upload Master Data (Excel)", type=['xlsx'])
+master_file = st.sidebar.file_uploader("1. Upload Master Data (cost & bbm 2022 sd 2025 HP & Type.xlsx)", type=['xlsx'])
 bbm_file = st.sidebar.file_uploader("2. Upload Transaksi BBM Mentah (BBM AAB.xlsx)", type=['xlsx'])
 
 mulai_proses = st.sidebar.button("Mulai Proses Analisa", type="primary", use_container_width=True)
@@ -52,11 +52,26 @@ def process_raw_data(file_master, file_bbm):
     
     col_name = next((c for c in df_map.columns if 'NAMA' in str(c).upper()), None)
     col_jenis = next((c for c in df_map.columns if 'ALAT' in str(c).upper() and 'BERAT' in str(c).upper() and c != col_name), None)
+    col_type = next((c for c in df_map.columns if 'TYPE' in str(c).upper() or 'MERK' in str(c).upper()), None)
     col_hp = next((c for c in df_map.columns if any(k == str(c).upper() for k in ['HP', 'HORSE POWER'])), None)
     col_cap = next((c for c in df_map.columns if any(k in str(c).upper() for k in ['CAP', 'KAPASITAS'])), None)
     col_loc = 'DES 2025' if 'DES 2025' in df_map.columns else df_map.columns[2]
 
-    df_map.rename(columns={col_name: 'Unit_Original', col_jenis: 'Jenis_Alat', col_hp: 'Horse_Power', col_cap: 'Capacity_Raw', col_loc: 'Lokasi'}, inplace=True)
+    rename_dict = {
+        col_name: 'Unit_Original', 
+        col_jenis: 'Jenis_Alat', 
+        col_hp: 'Horse_Power', 
+        col_cap: 'Capacity_Raw', 
+        col_loc: 'Lokasi'
+    }
+    if col_type:
+        rename_dict[col_type] = 'Type_Merk'
+
+    df_map.rename(columns=rename_dict, inplace=True)
+    
+    if 'Type_Merk' not in df_map.columns:
+        df_map['Type_Merk'] = "-"
+
     df_map.dropna(subset=['Unit_Original'], inplace=True)
     df_map['Unit_ID'] = df_map['Unit_Original'].apply(clean_unit_name)
     df_map = df_map[~df_map['Unit_Original'].astype(str).str.upper().str.contains('DUMMY', na=False)]
@@ -88,9 +103,27 @@ def process_raw_data(file_master, file_bbm):
                             cap_val = int(val_float + 0.5)
                     except: pass
 
+            # [UPDATE] Fix Typo Type/Merk secara spesifik
+            t_merk = str(row['Type_Merk']).strip().upper()
+            
+            # Ganti MITSUBHISI (Typo H) menjadi MITSUBISHI
+            t_merk = t_merk.replace("MITSUBHISI", "MITSUBISHI")
+            
+            # Ganti ITSUBISHI (Kurang M) menjadi MITSUBISHI
+            # Cek apakah string sama persis dengan ITSUBISHI
+            if t_merk == "ITSUBISHI":
+                t_merk = "MITSUBISHI"
+            # Cek apakah diawali ITSUBISHI diikuti spasi (misal ITSUBISHI FUSO)
+            elif t_merk.startswith("ITSUBISHI "):
+                t_merk = "MITSUBISHI " + t_merk[10:]
+            # Cek jika ada di tengah kalimat
+            elif " ITSUBISHI" in t_merk:
+                t_merk = t_merk.replace(" ITSUBISHI", " MITSUBISHI")
+
             master_data_map[clean_id] = {
                 'Unit_Name': row['Unit_Original'],
                 'Jenis_Alat': row['Jenis_Alat'],
+                'Type_Merk': t_merk,
                 'Horse_Power': row['Horse_Power'], 
                 'Capacity': cap_val,
                 'Lokasi': row['Lokasi']
@@ -152,7 +185,9 @@ def process_raw_data(file_master, file_bbm):
                         info = master_data_map[matched_id]
                         temp_df = pd.DataFrame({
                             'Date': dates, 'Unit_Name': info['Unit_Name'], 
-                            'Jenis_Alat': info['Jenis_Alat'], 'Horse_Power': info['Horse_Power'],
+                            'Jenis_Alat': info['Jenis_Alat'], 
+                            'Type_Merk': info['Type_Merk'],
+                            'Horse_Power': info['Horse_Power'],
                             'Capacity': info['Capacity'], 'Lokasi': info['Lokasi'],
                             'Metric': metric_type, 'Value': vals
                         })
@@ -169,7 +204,7 @@ def process_raw_data(file_master, file_bbm):
     df_trend_raw = df_all.copy()
 
     # Pivot Total
-    df_pivot = df_all.pivot_table(index=['Unit_Name', 'Lokasi', 'Jenis_Alat', 'Horse_Power', 'Capacity', 'Date'], columns='Metric', values='Value', aggfunc='sum').reset_index()
+    df_pivot = df_all.pivot_table(index=['Unit_Name', 'Lokasi', 'Jenis_Alat', 'Type_Merk', 'Horse_Power', 'Capacity', 'Date'], columns='Metric', values='Value', aggfunc='sum').reset_index()
     if 'HM' not in df_pivot.columns: df_pivot['HM'] = 0
     if 'LITER' not in df_pivot.columns: df_pivot['LITER'] = 0
     df_pivot['HM'], df_pivot['LITER'] = df_pivot['HM'].fillna(0), df_pivot['LITER'].fillna(0)
@@ -181,7 +216,7 @@ def process_raw_data(file_master, file_bbm):
     df_pivot.loc[(df_pivot['Delta_HM'] < 0) | (df_pivot['Delta_HM'] > 100), 'Delta_HM'] = 0 
     
     # --- D. BENCHMARK & STATUS ---
-    final_stats = df_pivot.groupby(['Unit_Name', 'Lokasi', 'Jenis_Alat', 'Horse_Power', 'Capacity']).agg({'LITER': 'sum', 'Delta_HM': 'sum'}).reset_index()
+    final_stats = df_pivot.groupby(['Unit_Name', 'Lokasi', 'Jenis_Alat', 'Type_Merk', 'Horse_Power', 'Capacity']).agg({'LITER': 'sum', 'Delta_HM': 'sum'}).reset_index()
     final_stats.rename(columns={'LITER': 'Total_Liter', 'Delta_HM': 'Total_HM_Work'}, inplace=True)
     final_stats['Fuel_Ratio'] = final_stats.apply(lambda row: row['Total_Liter'] / row['Total_HM_Work'] if row['Total_HM_Work'] > 0 else 0, axis=1)
     
@@ -271,7 +306,7 @@ if df_unit is not None:
     # --- PENCARIAN UNIT ---
     st.subheader("Cari Data Spesifik")
     
-    # [UPDATE] Dropdown Pemilihan Kategori (Menghapus Lokasi & Jenis Alat)
+    # Dropdown Pemilihan Kategori (Hanya Nama Unit & Horse Power)
     search_category = st.selectbox("Pilih Kategori Pencarian:", ["Nama Unit", "Horse Power"])
     
     # Input Pencarian
@@ -282,13 +317,12 @@ if df_unit is not None:
         mask_inactive = pd.Series([False] * (len(df_inaktif) if df_inaktif is not None else 0))
         valid_search = True
 
-        # [UPDATE] Logika Filter Hanya untuk Nama Unit & HP
         if search_category == "Nama Unit":
             mask_active = df_unit['Unit_Name'].astype(str).str.contains(search_keyword, na=False)
             if df_inaktif is not None: mask_inactive = df_inaktif['Unit_Name'].astype(str).str.contains(search_keyword, na=False)
         elif search_category == "Horse Power":
             try:
-                float(search_keyword) # Validasi angka
+                float(search_keyword) 
                 mask_active = df_unit['Horse_Power'].astype(str).str.contains(search_keyword, na=False)
                 if df_inaktif is not None: mask_inactive = df_inaktif['Horse_Power'].astype(str).str.contains(search_keyword, na=False)
             except ValueError:
@@ -310,7 +344,7 @@ if df_unit is not None:
                 st.info(f"Ditemukan {len(res_all)} Unit:")
                 if 'Fuel_Ratio' in res_all.columns: res_all.sort_values(by='Fuel_Ratio', ascending=False, inplace=True)
                 
-                cols_to_show = ['Unit_Name', 'Jenis_Alat', 'Status', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Group_Benchmark_Median', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']
+                cols_to_show = ['Unit_Name', 'Jenis_Alat', 'Type_Merk', 'Status', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Group_Benchmark_Median', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']
                 for c in cols_to_show:
                     if c not in res_all.columns: res_all[c] = 0 if c in ['Total_Liter', 'Total_HM_Work', 'Fuel_Ratio', 'Potensi_Pemborosan_Liter', 'Group_Benchmark_Median'] else "-"
                 
@@ -339,13 +373,18 @@ if df_unit is not None:
                 df_search_display['Potensi_Pemborosan_Liter'] = df_search_display.apply(format_pemborosan, axis=1)
                 df_search_display['Performance_Status'] = df_search_display.apply(format_status_bbm, axis=1) 
                 
-                rename_map_search = {'Unit_Name': 'Unit', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
+                rename_map_search = {'Unit_Name': 'Unit', 'Type_Merk': 'Type/Merk', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
                 df_search_display.rename(columns=rename_map_search, inplace=True)
 
+                # Fix konsistensi warna teks pencarian
                 def highlight_search(row):
                     status_bbm = str(row['Status_BBM']).upper()
-                    color = '#2ca02c' if status_bbm == 'EFISIEN' else ('#d62728' if status_bbm == 'BOROS' else '')
-                    return [f'background-color: {color}; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+                    if status_bbm == 'EFISIEN':
+                        return [f'background-color: #2ca02c; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+                    elif status_bbm == 'BOROS':
+                        return [f'background-color: #d62728; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+                    else:
+                        return ['' for _ in row.index]
 
                 st.dataframe(df_search_display.style.format({'Horse_Power': '{:.0f}', 'Total_Pengisian_BBM': '{:,.0f}', 'Total_Jam_Kerja': '{:,.0f}'}).apply(highlight_search, axis=1))
             else:
@@ -362,10 +401,13 @@ if df_unit is not None:
     type_options = ["Semua"] + sorted(df_unit['Jenis_Alat'].unique().tolist())
     selected_type = st.sidebar.selectbox("Pilih Jenis Alat:", type_options)
 
+    type_merk_options = ["Semua"] + sorted(df_unit['Type_Merk'].astype(str).unique().tolist())
+    selected_type_merk = st.sidebar.selectbox("Pilih Type/Merk:", type_merk_options)
+
     st.sidebar.subheader("Biaya Bahan Bakar")
     harga_solar = st.sidebar.number_input("Harga Solar (IDR):", value=6800, step=100, key='solar_alat')
 
-    # --- FILTER FINAL BERDASARKAN LOKASI & JENIS ---
+    # --- FILTER FINAL BERDASARKAN LOKASI & JENIS & TYPE/MERK ---
     df_active = df_unit.copy()
     df_inactive_show = df_inaktif.copy() if df_inaktif is not None else pd.DataFrame()
 
@@ -379,14 +421,19 @@ if df_unit is not None:
         if not df_inactive_show.empty:
             df_inactive_show = df_inactive_show[df_inactive_show['Jenis_Alat'] == selected_type]
 
+    if selected_type_merk != "Semua":
+        df_active = df_active[df_active['Type_Merk'] == selected_type_merk]
+        if not df_inactive_show.empty:
+            df_inactive_show = df_inactive_show[df_inactive_show['Type_Merk'] == selected_type_merk]
+
     # --- MAIN CONTENT ---
     st.subheader(f"Analisa Kategori: {selected_loc} - {selected_type}")
 
     if not df_inactive_show.empty:
         with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa (Inaktif)"):
-            df_inactive_display = df_inactive_show[['Unit_Name', 'Jenis_Alat', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work']].copy()
+            df_inactive_display = df_inactive_show[['Unit_Name', 'Jenis_Alat', 'Type_Merk', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work']].copy()
             df_inactive_display['Capacity'] = df_inactive_display.apply(format_capacity_with_unit, axis=1)
-            st.dataframe(df_inactive_display.rename(columns={'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Unit_Name': 'Unit'}))
+            st.dataframe(df_inactive_display.rename(columns={'Type_Merk': 'Type/Merk', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Unit_Name': 'Unit'}))
             
     if df_active.empty:
         st.warning(f"Tidak ada unit aktif untuk kategori {selected_loc} - {selected_type}.")
@@ -421,16 +468,22 @@ if df_unit is not None:
         st.subheader("Detail Unit Aktif")
         st.info(f"**Total Pemborosan**: **{total_waste:,.0f} Liter** setara dengan **Rp {total_loss_rp:,.0f}**")
         
-        df_display_active = df_active[['Unit_Name', 'Jenis_Alat', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Group_Benchmark_Median', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']].copy()
+        df_display_active = df_active[['Unit_Name', 'Jenis_Alat', 'Type_Merk', 'Horse_Power', 'Capacity', 'Lokasi', 'Total_Liter', 'Total_HM_Work', 'Group_Benchmark_Median', 'Fuel_Ratio', 'Performance_Status', 'Potensi_Pemborosan_Liter']].copy()
         df_display_active.sort_values(by='Fuel_Ratio', ascending=False, inplace=True)
         df_display_active['Capacity'] = df_display_active.apply(format_capacity_with_unit, axis=1)
         
-        rename_map_active = {'Unit_Name': 'Unit', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
+        rename_map_active = {'Unit_Name': 'Unit', 'Type_Merk': 'Type/Merk', 'Total_Liter': 'Total_Pengisian_BBM', 'Total_HM_Work': 'Total_Jam_Kerja', 'Group_Benchmark_Median': 'Benchmark', 'Performance_Status': 'Status_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM'}
         df_display_active.rename(columns=rename_map_active, inplace=True)
 
+        # Fix konsistensi warna teks
         def highlight_status(row):
-            color = '#2ca02c' if row['Status_BBM'] == 'EFISIEN' else ('#d62728' if row['Status_BBM'] == 'BOROS' else '')
-            return [f'background-color: {color}; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+            status = str(row['Status_BBM']).upper()
+            if status == 'EFISIEN':
+                return [f'background-color: #2ca02c; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+            elif status == 'BOROS':
+                return [f'background-color: #d62728; color: white' if col == 'Fuel_Ratio' else '' for col in row.index]
+            else:
+                return ['' for _ in row.index]
 
         st.dataframe(df_display_active.style.format({'Horse_Power': '{:.0f}', 'Total_Pengisian_BBM': '{:,.0f}', 'Total_Jam_Kerja': '{:,.0f}', 'Fuel_Ratio': '{:.2f}', 'Benchmark': '{:.2f}', 'Potensi_Pemborosan_BBM': '{:,.0f}'}).apply(highlight_status, axis=1))
         
@@ -465,17 +518,30 @@ if df_unit is not None:
         st.subheader("Peringkat Efisiensi Setiap Unit")
         df_plot_bar = df_active.rename(columns={'Unit_Name': 'Unit'})
         
-        fig_bar = px.bar(df_plot_bar, x='Unit', y='Fuel_Ratio', color='Fuel_Ratio', color_continuous_scale='RdYlGn_r', text_auto='.2f', 
-                         title=f"Konsumsi BBM (Liter/Jam)", labels={'Fuel_Ratio': 'Fuel Ratio', 'Lokasi': 'Lokasi'}, hover_data=['Lokasi'])
+        # Bar chart warna kategori & urutan terkecil ke terbesar
+        fig_bar = px.bar(df_plot_bar, x='Unit', y='Fuel_Ratio', color='Performance_Status',
+                         color_discrete_map={'EFISIEN': '#2ca02c', 'BOROS': '#d62728'},
+                         text_auto='.2f', 
+                         title=f"Konsumsi BBM (Liter/Jam)", 
+                         labels={'Fuel_Ratio': 'Fuel Ratio', 'Group_Benchmark_Median': 'Benchmark', 'Horse_Power': 'Horse Power', 'Lokasi': 'Lokasi'}, 
+                         hover_data={'Group_Benchmark_Median': ':.2f', 'Horse_Power': True, 'Lokasi': True})
+        
+        fig_bar.update_layout(xaxis={'categoryorder':'array', 'categoryarray': df_plot_bar['Unit']})
+        
         st.plotly_chart(fig_bar, use_container_width=True)
         
     # Tab C: Scatter
     with tab_c:
         st.subheader("Jam Kerja vs BBM")
         color_map_status = {"EFISIEN": "#2ca02c", "BOROS": "#d62728"}
-        labels_map = {'Total_HM_Work': 'Total_Jam_Kerja', 'Total_Liter': 'Total_Pengisian_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM', 'Performance_Status': 'Status_BBM', 'Unit_Name': 'Unit', 'Lokasi': 'Lokasi'}
+        labels_map = {'Total_HM_Work': 'Total_Jam_Kerja', 'Total_Liter': 'Total_Pengisian_BBM', 'Potensi_Pemborosan_Liter': 'Potensi_Pemborosan_BBM', 'Performance_Status': 'Status_BBM', 'Unit_Name': 'Unit', 'Lokasi': 'Lokasi', 'Group_Benchmark_Median': 'Benchmark'}
 
-        fig_scat = px.scatter(df_active, x='Total_HM_Work', y='Total_Liter', color='Performance_Status', size='Total_Liter', hover_name='Unit_Name', hover_data={'Performance_Status': False, 'Total_HM_Work': False, 'Total_Liter': False, 'Fuel_Ratio': ':.2f', 'Potensi_Pemborosan_Liter': ':,.0f', 'Lokasi': True}, color_discrete_map=color_map_status, labels=labels_map, title="Sebaran Efisiensi Setiap Unit")
+        # Menyiapkan kolom size
+        df_active['Scatter_Size'] = df_active['Potensi_Pemborosan_Liter'].apply(lambda x: 1000 + x if x > 0 else 1000)
+
+        fig_scat = px.scatter(df_active, x='Total_HM_Work', y='Total_Liter', color='Performance_Status', size='Scatter_Size', hover_name='Unit_Name', 
+                              hover_data={'Performance_Status': False, 'Total_HM_Work': ':,.0f', 'Total_Liter': ':,.0f', 'Scatter_Size': False, 'Fuel_Ratio': ':.2f', 'Group_Benchmark_Median': ':.2f', 'Potensi_Pemborosan_Liter': ':,.0f', 'Lokasi': True, 'Horse_Power': False}, 
+                              color_discrete_map=color_map_status, labels=labels_map, title="Sebaran Efisiensi Setiap Unit")
         st.plotly_chart(fig_scat, use_container_width=True)
 
     # Tab D: Analisa Pemborosan
