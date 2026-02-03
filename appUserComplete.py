@@ -110,13 +110,10 @@ def process_raw_data(file_master, file_bbm):
             t_merk = t_merk.replace("MITSUBHISI", "MITSUBISHI")
             
             # Ganti ITSUBISHI (Kurang M) menjadi MITSUBISHI
-            # Cek apakah string sama persis dengan ITSUBISHI
             if t_merk == "ITSUBISHI":
                 t_merk = "MITSUBISHI"
-            # Cek apakah diawali ITSUBISHI diikuti spasi (misal ITSUBISHI FUSO)
             elif t_merk.startswith("ITSUBISHI "):
                 t_merk = "MITSUBISHI " + t_merk[10:]
-            # Cek jika ada di tengah kalimat
             elif " ITSUBISHI" in t_merk:
                 t_merk = t_merk.replace(" ITSUBISHI", " MITSUBISHI")
 
@@ -427,7 +424,8 @@ if df_unit is not None:
             df_inactive_show = df_inactive_show[df_inactive_show['Type_Merk'] == selected_type_merk]
 
     # --- MAIN CONTENT ---
-    st.subheader(f"Analisa Kategori: {selected_loc} - {selected_type}")
+    # [UPDATE] Menambahkan variabel selected_type_merk ke subheader
+    st.subheader(f"Analisa Kategori: {selected_loc} - {selected_type} - {selected_type_merk}")
 
     if not df_inactive_show.empty:
         with st.expander(f"⚠️ {len(df_inactive_show)} Unit Tidak Masuk Analisa (Inaktif)"):
@@ -523,8 +521,8 @@ if df_unit is not None:
                          color_discrete_map={'EFISIEN': '#2ca02c', 'BOROS': '#d62728'},
                          text_auto='.2f', 
                          title=f"Konsumsi BBM (Liter/Jam)", 
-                         labels={'Fuel_Ratio': 'Fuel Ratio', 'Group_Benchmark_Median': 'Benchmark', 'Horse_Power': 'Horse Power', 'Lokasi': 'Lokasi'}, 
-                         hover_data={'Group_Benchmark_Median': ':.2f', 'Horse_Power': True, 'Lokasi': True})
+                         labels={'Fuel_Ratio': 'Fuel Ratio', 'Lokasi': 'Lokasi', 'Horse_Power': 'Horse Power', 'Group_Benchmark_Median': 'Benchmark'}, 
+                         hover_data={'Lokasi': True, 'Horse_Power': True, 'Group_Benchmark_Median': ':.2f'})
         
         fig_bar.update_layout(xaxis={'categoryorder':'array', 'categoryarray': df_plot_bar['Unit']})
         
