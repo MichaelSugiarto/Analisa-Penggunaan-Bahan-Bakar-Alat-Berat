@@ -103,7 +103,7 @@ def process_raw_data(file_master, file_bbm):
                             cap_val = int(val_float + 0.5)
                     except: pass
 
-            # [UPDATE] Fix Typo Type/Merk secara spesifik
+            # Fix Typo Type/Merk secara spesifik
             t_merk = str(row['Type_Merk']).strip().upper()
             
             # Ganti MITSUBHISI (Typo H) menjadi MITSUBISHI
@@ -392,39 +392,76 @@ if df_unit is not None:
     # --- Sidebar Filters ---
     st.sidebar.subheader("Filter Dashboard")
 
-    loc_options = ["Semua"] + sorted(df_unit['Lokasi'].unique().tolist())
+    # [UPDATE] 1. Filter Kategori Utama (Radio Button, Tanpa 'Semua')
+    cat_options = ["Trucking (Tronton & Trailer)", "Alat Berat (Non-Trucking)"]
+    selected_cat = st.sidebar.radio("Pilih Kategori Unit:", cat_options)
+
+    # Filter Data Temporary to generate options for next filters
+    df_filtered_step1 = df_unit.copy()
+    trucking_types = ['TRONTON', 'TRAILER']
+    
+    if selected_cat == "Trucking (Tronton & Trailer)":
+        df_filtered_step1 = df_filtered_step1[df_filtered_step1['Jenis_Alat'].isin(trucking_types)]
+    elif selected_cat == "Alat Berat (Non-Trucking)":
+        df_filtered_step1 = df_filtered_step1[~df_filtered_step1['Jenis_Alat'].isin(trucking_types)]
+
+    # [UPDATE] 2. Filter Lokasi (Based on Category)
+    loc_options = ["Semua"] + sorted(df_filtered_step1['Lokasi'].unique().tolist())
     selected_loc = st.sidebar.selectbox("Pilih Lokasi:", loc_options)
 
-    type_options = ["Semua"] + sorted(df_unit['Jenis_Alat'].unique().tolist())
+    # [UPDATE] 3. Filter Jenis Alat (Based on Category & Location)
+    df_filtered_step2 = df_filtered_step1.copy()
+    if selected_loc != "Semua":
+        df_filtered_step2 = df_filtered_step2[df_filtered_step2['Lokasi'] == selected_loc]
+
+    type_options = ["Semua"] + sorted(df_filtered_step2['Jenis_Alat'].unique().tolist())
     selected_type = st.sidebar.selectbox("Pilih Jenis Alat:", type_options)
 
-    type_merk_options = ["Semua"] + sorted(df_unit['Type_Merk'].astype(str).unique().tolist())
+    # [UPDATE] 4. Filter Type/Merk (Based on Category, Location, Type)
+    df_filtered_step3 = df_filtered_step2.copy()
+    if selected_type != "Semua":
+        df_filtered_step3 = df_filtered_step3[df_filtered_step3['Jenis_Alat'] == selected_type]
+
+    type_merk_options = ["Semua"] + sorted(df_filtered_step3['Type_Merk'].astype(str).unique().tolist())
     selected_type_merk = st.sidebar.selectbox("Pilih Type/Merk:", type_merk_options)
 
     st.sidebar.subheader("Biaya Bahan Bakar")
     harga_solar = st.sidebar.number_input("Harga Solar (IDR):", value=6800, step=100, key='solar_alat')
 
-    # --- FILTER FINAL BERDASARKAN LOKASI & JENIS & TYPE/MERK ---
+    # --- FILTER FINAL BERDASARKAN SEMUA SELEKSI ---
     df_active = df_unit.copy()
     df_inactive_show = df_inaktif.copy() if df_inaktif is not None else pd.DataFrame()
 
+    # 1. Apply Category
+    if selected_cat == "Trucking (Tronton & Trailer)":
+        df_active = df_active[df_active['Jenis_Alat'].isin(trucking_types)]
+        if not df_inactive_show.empty:
+             df_inactive_show = df_inactive_show[df_inactive_show['Jenis_Alat'].isin(trucking_types)]
+    elif selected_cat == "Alat Berat (Non-Trucking)":
+        df_active = df_active[~df_active['Jenis_Alat'].isin(trucking_types)]
+        if not df_inactive_show.empty:
+             df_inactive_show = df_inactive_show[~df_inactive_show['Jenis_Alat'].isin(trucking_types)]
+
+    # 2. Apply Location
     if selected_loc != "Semua":
         df_active = df_active[df_active['Lokasi'] == selected_loc]
         if not df_inactive_show.empty:
             df_inactive_show = df_inactive_show[df_inactive_show['Lokasi'] == selected_loc]
 
+    # 3. Apply Type
     if selected_type != "Semua":
         df_active = df_active[df_active['Jenis_Alat'] == selected_type]
         if not df_inactive_show.empty:
             df_inactive_show = df_inactive_show[df_inactive_show['Jenis_Alat'] == selected_type]
 
+    # 4. Apply Merk
     if selected_type_merk != "Semua":
         df_active = df_active[df_active['Type_Merk'] == selected_type_merk]
         if not df_inactive_show.empty:
             df_inactive_show = df_inactive_show[df_inactive_show['Type_Merk'] == selected_type_merk]
 
     # --- MAIN CONTENT ---
-    # [UPDATE] Menambahkan variabel selected_type_merk ke subheader
+    # [UPDATE] Variabel selected_type_merk ditambahkan ke judul
     st.subheader(f"Analisa Kategori: {selected_loc} - {selected_type} - {selected_type_merk}")
 
     if not df_inactive_show.empty:
