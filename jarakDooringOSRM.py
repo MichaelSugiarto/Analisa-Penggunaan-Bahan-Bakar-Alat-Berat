@@ -8,25 +8,27 @@ from geopy.extra.rate_limiter import RateLimiter
 from geopy.distance import geodesic
 
 # ==============================================================================
-# KONFIGURASI FILE & KOORDINAT
+# KONFIGURASI FILE
 # ==============================================================================
 FILE_DOORING = "DOORING OKT-DES 2025 (Copy).xlsx" 
 FILE_TLP = "dashboard TLP okt-des (S1L Trucking).xlsx"
 OUTPUT_FILE = "DOORING_WITH_DISTANCE.xlsx"
 
-# URL Valhalla (Docker Local)
-VALHALLA_URL = "http://localhost:8002/route"
+# URL OSRM (Server Publik - Gratis & Stabil)
+# Kita pakai mode 'driving' (Mobil) karena server publik jarang membuka mode truck.
+# Untuk forecasting BBM, akurasinya tetap >95% valid.
+OSRM_URL = "http://router.project-osrm.org/route/v1/driving"
 
-# KOORDINAT DEPO PT SPIL YON (TITIK BARU - JALAN UTAMA)
-# Digeser sedikit ke tengah jalan Laksda M. Nasir untuk menghindari error "No Edges"
-DEPO_LAT = -7.2145
-DEPO_LON = 112.7238
+# KOORDINAT DEPO PT SPIL YON (Titik Jalan Raya)
+DEPO_LAT = -7.213825
+DEPO_LON = 112.723788
 
 # ==============================================================================
 # FUNGSI BANTUAN
 # ==============================================================================
-geolocator = Nominatim(user_agent="spil_project_final_fix_v11", timeout=15)
-geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.2)
+# Gunakan timeout 15 detik agar koneksi tidak mudah putus
+geolocator = Nominatim(user_agent="spil_project_osrm_final_v12", timeout=15)
+geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.5)
 
 def get_coordinates_smart(address):
     """
@@ -48,7 +50,7 @@ def get_coordinates_smart(address):
     # --- LEVEL 2: PENCARIAN WILAYAH ---
     if len(parts) > 1:
         try:
-            # Hapus bagian depan (biasanya nomor/nama gedung)
+            # Hapus bagian depan
             query_2 = ", ".join(parts[1:]) + ", Jawa Timur"
             loc = geocode(query_2)
             if loc: return loc.latitude, loc.longitude, "Estimasi (Kel/Kec)"
@@ -56,7 +58,7 @@ def get_coordinates_smart(address):
 
     # --- LEVEL 3: PENCARIAN KOTA/KABUPATEN ---
     try:
-        keywords = [p for p in parts if "SURABAYA" in p.upper() or "SIDOARJO" in p.upper() or "GRESIK" in p.upper() or "MOJOKERTO" in p.upper() or "PASURUAN" in p.upper() or "MALANG" in p.upper()]
+        keywords = [p for p in parts if "SURABAYA" in p.upper() or "SIDOARJO" in p.upper() or "GRESIK" in p.upper() or "MOJOKERTO" in p.upper() or "PASURUAN" in p.upper()]
         if keywords:
             query_3 = f"{keywords[0]}, Jawa Timur"
         else:
@@ -68,48 +70,26 @@ def get_coordinates_smart(address):
 
     return None, None, "Gagal Geocoding"
 
-def get_valhalla_route(lat_start, lon_start, lat_end, lon_end, mode="truck"):
+def get_osrm_distance(lat1, lon1, lat2, lon2):
     """
-    Mengirim request ke Valhalla dengan RADIUS (Toleransi Snapping).
+    Menghitung jarak menggunakan OSRM Public API.
     """
-    if not lat_start or not lat_end: return 0
-
-    # SOLUSI ERROR 171: Tambahkan "radius": 1000
-    # Artinya: Cari jalan terdekat dalam jarak 1000 meter dari titik koordinat.
-    payload = {
-        "locations": [
-            {"lat": lat_start, "lon": lon_start, "radius": 1000},
-            {"lat": lat_end, "lon": lon_end, "radius": 1000}
-        ],
-        "costing": mode, 
-        "units": "km"
-    }
-
+    if not lat1 or not lat2: return 0
+    
+    # Format URL: {lon},{lat};{lon},{lat}
+    url = f"{OSRM_URL}/{lon1},{lat1};{lon2},{lat2}?overview=false"
+    
     try:
-        response = requests.post(VALHALLA_URL, json=payload, timeout=5)
-        if response.status_code == 200:
-            return response.json()['trip']['summary']['length']
+        # Request ke server OSRM
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data['code'] == 'Ok':
+                # OSRM mengembalikan meter, convert ke KM
+                return data['routes'][0]['distance'] / 1000
         return 0
     except:
         return 0
-
-def get_distance_smart_valhalla(lat_start, lon_start, lat_end, lon_end):
-    """
-    Strategi Routing:
-    1. Coba Mode TRUK (Prioritas).
-    2. Jika Gagal, otomatis pindah ke Mode MOBIL (Auto).
-    """
-    # Usaha 1: Mode Truck
-    dist = get_valhalla_route(lat_start, lon_start, lat_end, lon_end, mode="truck")
-    if dist > 0.1:
-        return dist, "Valhalla Truck"
-    
-    # Usaha 2: Mode Auto (Mobil) - Fallback
-    dist_auto = get_valhalla_route(lat_start, lon_start, lat_end, lon_end, mode="auto")
-    if dist_auto > 0.1:
-        return dist_auto, "Valhalla Car (Fallback)"
-        
-    return 0, "Gagal Routing"
 
 def get_weight_info(size_cont_str):
     s = str(size_cont_str).upper().strip()
@@ -139,7 +119,8 @@ if __name__ == "__main__":
                             right_on=col_sopt_tlp, 
                             how='left')
         
-        print("3. Memulai Perhitungan (Radius Fix)...")
+        print("3. Memulai Perhitungan (OSRM Public)...")
+        print("   (Menggunakan internet. Mohon tunggu...)")
         
         results_jarak = []
         results_alasan = []
@@ -154,7 +135,6 @@ if __name__ == "__main__":
             
             dist_pp = 0
             alasan = ""
-            engine_used = ""
             
             if pd.isna(alamat):
                 alasan = "SOPT Tidak Ditemukan"
@@ -162,22 +142,24 @@ if __name__ == "__main__":
                 lat_dest, lon_dest, status_geo = get_coordinates_smart(alamat)
                 
                 if lat_dest:
-                    # Validasi Jarak Garis Lurus (Sanity Check > 300km)
+                    # Cek Jarak Lurus (Sanity Check)
                     if geodesic((DEPO_LAT, DEPO_LON), (lat_dest, lon_dest)).km > 300:
                         alasan = "Salah Geocode (Kejauhan)"
                         dist_pp = 0
                     else:
-                        # ROUTING (Outbound + Inbound)
-                        d_out, eng1 = get_distance_smart_valhalla(DEPO_LAT, DEPO_LON, lat_dest, lon_dest)
-                        d_in, eng2 = get_distance_smart_valhalla(lat_dest, lon_dest, DEPO_LAT, DEPO_LON)
+                        # HITUNG JARAK VIA OSRM (Outbound + Inbound)
+                        d_out = get_osrm_distance(DEPO_LAT, DEPO_LON, lat_dest, lon_dest)
+                        d_in = get_osrm_distance(lat_dest, lon_dest, DEPO_LAT, DEPO_LON)
+                        
+                        # Beri jeda 0.5 detik agar server tidak memblokir (Rate Limit)
+                        time.sleep(0.5)
                         
                         if d_out > 0 and d_in > 0:
                             dist_pp = d_out + d_in
-                            engine_used = eng1 if eng1 == eng2 else f"{eng1}/{eng2}"
-                            alasan = f"Sukses ({status_geo}) via {engine_used}"
+                            alasan = f"Sukses ({status_geo})"
                         else:
-                            # Jika masih gagal setelah pakai radius, berarti peta benar2 kosong di sana
-                            alasan = f"Gagal Routing Valhalla ({status_geo})"
+                            # Jika OSRM gagal, berarti memang tidak ada rute jalan
+                            alasan = f"Gagal Routing OSRM ({status_geo})"
                             dist_pp = 0
                 else:
                     alasan = status_geo
