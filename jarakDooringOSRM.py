@@ -8,119 +8,194 @@ from geopy.extra.rate_limiter import RateLimiter
 from geopy.distance import geodesic
 
 # ==============================================================================
-# KONFIGURASI FILE
+# KONFIGURASI
 # ==============================================================================
 FILE_DOORING = "DOORING OKT-DES 2025 (Copy).xlsx" 
 FILE_TLP = "dashboard TLP okt-des (S1L Trucking).xlsx"
 OUTPUT_FILE = "DOORING_WITH_DISTANCE.xlsx"
 
-# URL OSRM (Server Publik - Gratis & Stabil)
-# Kita pakai mode 'driving' (Mobil) karena server publik jarang membuka mode truck.
-# Untuk forecasting BBM, akurasinya tetap >95% valid.
+# ENGINE: OSRM PUBLIC
 OSRM_URL = "http://router.project-osrm.org/route/v1/driving"
 
-# KOORDINAT DEPO PT SPIL YON (Titik Jalan Raya)
-DEPO_LAT = -7.213825
-DEPO_LON = 112.723788
+# DEPO: Laksda M. Nasir (Sesuai Request Terakhir)
+DEPO_LAT = -7.2145
+DEPO_LON = 112.7238
 
 # ==============================================================================
 # FUNGSI BANTUAN
 # ==============================================================================
-# Gunakan timeout 15 detik agar koneksi tidak mudah putus
-geolocator = Nominatim(user_agent="spil_project_osrm_final_v12", timeout=15)
+geolocator = Nominatim(user_agent="spil_project_multisheet_v17", timeout=20)
 geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.5)
 
+def clean_address_string(addr):
+    s = str(addr).upper().replace("\n", ", ").replace(";", ", ").replace("  ", " ").strip()
+    return s
+
 def get_coordinates_smart(address):
-    """
-    Geocoding Bertingkat: Jalan -> Kelurahan -> Kota
-    """
+    """Geocoding Hybrid (Smart Split + Anti-Gedung)"""
     if pd.isna(address) or str(address).strip() in ["-", "", "nan"]:
         return None, None, "Alamat Kosong"
 
-    clean_addr = str(address).replace("\n", ", ").replace(";", ", ").replace("  ", " ").strip()
-    parts = [p.strip() for p in clean_addr.split(',')]
+    raw_addr = clean_address_string(address)
     
-    # --- LEVEL 1: PENCARIAN EXACT ---
+    # 1. EXACT SEARCH
     try:
-        query_1 = f"{clean_addr}, Jawa Timur"
-        loc = geocode(query_1)
-        if loc: return loc.latitude, loc.longitude, "Akurat (Jalan)"
+        loc = geocode(f"{raw_addr}, Jawa Timur")
+        if loc: return loc.latitude, loc.longitude, "Akurat (Lengkap)"
     except: pass 
 
-    # --- LEVEL 2: PENCARIAN WILAYAH ---
-    if len(parts) > 1:
+    # 2. HAPUS NAMA PT/GEDUNG
+    keywords_trash = ["PT.", "CV.", "PABRIK", "MASJID", "GEREJA", "GUDANG", "DEPO", "TOKO"]
+    clean_name = raw_addr
+    for k in keywords_trash:
+        if k in clean_name:
+            parts = clean_name.split(',')
+            if len(parts) > 1:
+                clean_name = ", ".join(parts[1:])
+            break  
+    if clean_name != raw_addr:
         try:
-            # Hapus bagian depan
-            query_2 = ", ".join(parts[1:]) + ", Jawa Timur"
-            loc = geocode(query_2)
-            if loc: return loc.latitude, loc.longitude, "Estimasi (Kel/Kec)"
+            loc = geocode(f"{clean_name}, Jawa Timur")
+            if loc: return loc.latitude, loc.longitude, "Estimasi (Tanpa Gedung)"
         except: pass
 
-    # --- LEVEL 3: PENCARIAN KOTA/KABUPATEN ---
+    # 3. POTONG BAGIAN DEPAN
+    parts = raw_addr.split(',')
+    if len(parts) > 1:
+        try:
+            loc = geocode(", ".join(parts[1:]) + ", Jawa Timur")
+            if loc: return loc.latitude, loc.longitude, "Estimasi (Wilayah)"
+        except: pass
+
+    # 4. CARI KOTA/KABUPATEN
     try:
-        keywords = [p for p in parts if "SURABAYA" in p.upper() or "SIDOARJO" in p.upper() or "GRESIK" in p.upper() or "MOJOKERTO" in p.upper() or "PASURUAN" in p.upper()]
-        if keywords:
-            query_3 = f"{keywords[0]}, Jawa Timur"
-        else:
-            query_3 = f"{parts[-1]}, Jawa Timur"
-            
-        loc = geocode(query_3)
+        keywords = [p for p in parts if "SURABAYA" in p or "SIDOARJO" in p or "GRESIK" in p or "MOJOKERTO" in p or "PASURUAN" in p or "LAMONGAN" in p or "MALANG" in p or "TUBAN" in p]
+        query_4 = f"{keywords[0]}, Jawa Timur" if keywords else f"{parts[-1]}, Jawa Timur"
+        loc = geocode(query_4)
         if loc: return loc.latitude, loc.longitude, "General (Kota/Kab)"
     except: pass
 
     return None, None, "Gagal Geocoding"
 
 def get_osrm_distance(lat1, lon1, lat2, lon2):
-    """
-    Menghitung jarak menggunakan OSRM Public API.
-    """
     if not lat1 or not lat2: return 0
-    
-    # Format URL: {lon},{lat};{lon},{lat}
     url = f"{OSRM_URL}/{lon1},{lat1};{lon2},{lat2}?overview=false"
-    
     try:
-        # Request ke server OSRM
         r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data['code'] == 'Ok':
-                # OSRM mengembalikan meter, convert ke KM
-                return data['routes'][0]['distance'] / 1000
+        if r.status_code == 200 and r.json()['code'] == 'Ok':
+            return r.json()['routes'][0]['distance'] / 1000
         return 0
-    except:
-        return 0
+    except: return 0
 
 def get_weight_info(size_cont_str):
+    """
+    Return: (berat_full_ton, berat_empty_ton)
+    """
     s = str(size_cont_str).upper().strip()
-    if "40" in s: return 32.0, 3.8
-    elif "COMBO" in s or "2X20" in s: return 54.0, 4.6
-    else: return 27.0, 2.3
+    # Logic 40ft
+    if "40" in s: 
+        return 32.0, 3.8
+    # Logic Combo / 2x20
+    elif "COMBO" in s or "2X20" in s: 
+        return 54.0, 4.6
+    # Logic 20ft (Default)
+    else: 
+        return 27.0, 2.3
+
+def read_all_sheets_and_normalize(file_path, file_type):
+    """
+    Membaca semua sheet dan menstandarisasi nama kolom
+    file_type: 'DOORING' atau 'TLP'
+    """
+    print(f"   -> Membaca {file_type}: {file_path}...")
+    try:
+        # Baca semua sheet
+        all_sheets = pd.read_excel(file_path, sheet_name=None) 
+        df_list = []
+        
+        for sheet_name, df in all_sheets.items():
+            # Standardize column names (strip spaces, upper case)
+            df.columns = [str(c).strip().upper() for c in df.columns]
+            
+            # Tambahkan kolom penanda sheet (bulan)
+            df['SOURCE_SHEET'] = sheet_name
+            
+            # --- LOGIKA NORMALISASI KOLOM ---
+            if file_type == 'DOORING':
+                # Target: 'NO_SOPT_FIX', 'SIZE_CONT_FIX'
+                # Cari NO SOPT
+                if 'NO. SOPT 1' in df.columns:
+                    df['NO_SOPT_FIX'] = df['NO. SOPT 1']
+                elif 'NO SOPT' in df.columns: # Handle Sheet DES
+                    df['NO_SOPT_FIX'] = df['NO SOPT']
+                else:
+                    print(f"      [Warning] Sheet '{sheet_name}' tidak punya kolom SOPT. Skip.")
+                    continue
+                
+                # Cari Size Cont
+                if 'SIZE CONT' in df.columns:
+                    df['SIZE_CONT_FIX'] = df['SIZE CONT']
+                else:
+                    df['SIZE_CONT_FIX'] = "20" # Default
+                    
+            elif file_type == 'TLP':
+                # Target: 'SOPT_NO_REF', 'ALAMAT_REF'
+                # Cari SOPT NO
+                if 'SOPT NO' in df.columns:
+                    df['SOPT_NO_REF'] = df['SOPT NO']
+                elif 'SOPT_NO' in df.columns:
+                    df['SOPT_NO_REF'] = df['SOPT_NO']
+                else:
+                    print(f"      [Warning] Sheet '{sheet_name}' tidak punya kolom SOPT NO. Skip.")
+                    continue
+                
+                # Cari Alamat
+                if 'DOORING_ADDRESS' in df.columns: # Sheet Okt
+                    df['ALAMAT_REF'] = df['DOORING_ADDRESS']
+                elif 'PICKUP / DELIVERY ADDRESS' in df.columns: # Sheet Nov, Des
+                    df['ALAMAT_REF'] = df['PICKUP / DELIVERY ADDRESS']
+                else:
+                    df['ALAMAT_REF'] = None
+            
+            df_list.append(df)
+            
+        if df_list:
+            combined_df = pd.concat(df_list, ignore_index=True)
+            print(f"      -> Total data {file_type}: {len(combined_df)} baris (Gabungan semua sheet)")
+            return combined_df
+        else:
+            return pd.DataFrame()
+            
+    except Exception as e:
+        print(f"Error reading {file_type}: {e}")
+        return pd.DataFrame()
 
 # ==============================================================================
 # MAIN PROCESS
 # ==============================================================================
 if __name__ == "__main__":
-    print("1. Membaca File Data...")
+    print("1. Membaca & Menstandarisasi Data (Multi-Sheet)...")
     
-    try:
-        df_dooring = pd.read_excel(FILE_DOORING)
-        df_tlp = pd.read_excel(FILE_TLP)
+    # BACA DOORING (Okt, Nov, Des)
+    df_dooring = read_all_sheets_and_normalize(FILE_DOORING, 'DOORING')
+    
+    # BACA TLP (Okt, Nov, Des)
+    df_tlp = read_all_sheets_and_normalize(FILE_TLP, 'TLP')
+    
+    if df_dooring.empty or df_tlp.empty:
+        print("[CRITICAL] Salah satu file kosong atau gagal dibaca. Stop.")
+    else:
+        print("2. Menggabungkan Data (Merge SOPT)...")
+        # Siapkan referensi TLP (hapus duplikat SOPT agar VLOOKUP aman)
+        df_ref = df_tlp[['SOPT_NO_REF', 'ALAMAT_REF']].drop_duplicates(subset=['SOPT_NO_REF'])
         
-        col_sopt_dooring = 'NO. SOPT 1'
-        col_sopt_tlp = 'SOPT_NO'
-        col_alamat_tlp = 'DOORING_ADDRESS' 
-        col_size_cont = 'SIZE CONT'
-        
-        print("2. Menggabungkan Data...")
-        df_ref = df_tlp[[col_sopt_tlp, col_alamat_tlp]].drop_duplicates(subset=[col_sopt_tlp])
+        # Merge
         df_merge = pd.merge(df_dooring, df_ref, 
-                            left_on=col_sopt_dooring, 
-                            right_on=col_sopt_tlp, 
+                            left_on='NO_SOPT_FIX', 
+                            right_on='SOPT_NO_REF', 
                             how='left')
         
-        print("3. Memulai Perhitungan (OSRM Public)...")
-        print("   (Menggunakan internet. Mohon tunggu...)")
+        print("3. Memulai Perhitungan (Hybrid Smart Geocoding + OSRM)...")
         
         results_jarak = []
         results_alasan = []
@@ -130,44 +205,44 @@ if __name__ == "__main__":
         total_data = len(df_merge)
         
         for idx, row in df_merge.iterrows():
-            alamat = row[col_alamat_tlp]
-            size_cont = row[col_size_cont]
+            alamat = row['ALAMAT_REF']
+            size_cont = row['SIZE_CONT_FIX']
             
             dist_pp = 0
             alasan = ""
             
+            # --- GEOCODING & ROUTING ---
             if pd.isna(alamat):
-                alasan = "SOPT Tidak Ditemukan"
+                alasan = "SOPT Tidak Ditemukan / Alamat Kosong di TLP"
             else:
-                lat_dest, lon_dest, status_geo = get_coordinates_smart(alamat)
+                try:
+                    lat_dest, lon_dest, status_geo = get_coordinates_smart(alamat)
+                except:
+                    lat_dest = None
+                    alasan = "Error Koneksi"
                 
                 if lat_dest:
-                    # Cek Jarak Lurus (Sanity Check)
-                    if geodesic((DEPO_LAT, DEPO_LON), (lat_dest, lon_dest)).km > 300:
+                    if geodesic((DEPO_LAT, DEPO_LON), (lat_dest, lon_dest)).km > 400:
                         alasan = "Salah Geocode (Kejauhan)"
-                        dist_pp = 0
                     else:
-                        # HITUNG JARAK VIA OSRM (Outbound + Inbound)
                         d_out = get_osrm_distance(DEPO_LAT, DEPO_LON, lat_dest, lon_dest)
                         d_in = get_osrm_distance(lat_dest, lon_dest, DEPO_LAT, DEPO_LON)
                         
-                        # Beri jeda 0.5 detik agar server tidak memblokir (Rate Limit)
-                        time.sleep(0.5)
+                        time.sleep(0.2) # Rate limit protection
                         
                         if d_out > 0 and d_in > 0:
                             dist_pp = d_out + d_in
                             alasan = f"Sukses ({status_geo})"
                         else:
-                            # Jika OSRM gagal, berarti memang tidak ada rute jalan
                             alasan = f"Gagal Routing OSRM ({status_geo})"
-                            dist_pp = 0
                 else:
-                    alasan = status_geo
+                    if not alasan: alasan = status_geo
 
-            # BERAT & TONKM
+            # --- PERHITUNGAN BERAT & TONKM ---
             b_full, b_empty = get_weight_info(size_cont)
             total_berat_display = b_full + b_empty
             
+            # Rumus: (Jarak/2 * Full) + (Jarak/2 * Empty)
             if dist_pp > 0:
                 half_dist = dist_pp / 2
                 tonkm_val = (half_dist * b_full) + (half_dist * b_empty)
@@ -179,36 +254,50 @@ if __name__ == "__main__":
             results_total_berat.append(total_berat_display)
             results_tonkm.append(tonkm_val)
             
-            if (idx + 1) % 10 == 0:
-                short_addr = str(alamat)[:20].replace('\n','')
-                print(f"   -> {idx+1}/{total_data} | {dist_pp:.1f}km | {alasan} | {short_addr}...")
+            if (idx + 1) % 50 == 0:
+                print(f"   -> {idx+1}/{total_data} | {dist_pp:.1f}km | {alasan}")
 
-        # OUTPUT
+        # --- OUTPUT ---
         df_merge['Jarak_PP_Km'] = results_jarak
         df_merge['Total_Berat_Ton'] = results_total_berat
         df_merge['TonKm_Dooring'] = results_tonkm
         df_merge['Alasan'] = results_alasan
-        df_merge['NO'] = df_merge.index + 1
-        df_merge['SOPT_NO_FINAL'] = df_merge[col_sopt_tlp].fillna(df_merge[col_sopt_dooring])
         
-        cols_final = [
-            'NO', 'BULAN', 'LAMBUNG', 'NOPOL', 'SIZE CONT', 'SOPT_NO_FINAL', 
-            'DOORING_ADDRESS', 'AREA START', 'AREA AMBIL EMPTY 1', 'AREA PABRIK', 
-            'AREA BONGKAR 1', 'Jarak_PP_Km', 'Total_Berat_Ton', 'TonKm_Dooring', 'Alasan'
+        # Rapikan Kolom Output
+        # Gunakan kolom asli jika ada, jika tidak pakai "-"
+        # Prioritas kolom output: Sesuai file Excel Asli Dooring
+        target_cols = [
+            'NO', 'BULAN', 'LAMBUNG', 'NOPOL', 'SIZE CONT', 'NO_SOPT_FIX', # Use fixed SOPT
+            'ALAMAT_REF', # Alamat hasil merge
+            'AREA START', 'AREA AMBIL EMPTY 1', 'AREA PABRIK', 'AREA BONGKAR 1',
+            'Jarak_PP_Km', 'Total_Berat_Ton', 'TonKm_Dooring', 'Alasan'
         ]
         
-        for c in cols_final:
-            if c not in df_merge.columns:
-                if c == 'AREA AMBIL EMPTY 1' and 'AREA AMBIL EMPTY' in df_merge.columns:
-                    df_merge['AREA AMBIL EMPTY 1'] = df_merge['AREA AMBIL EMPTY']
-                elif c == 'AREA BONGKAR 1' and 'AREA BONGKAR' in df_merge.columns:
-                    df_merge['AREA BONGKAR 1'] = df_merge['AREA BONGKAR']
-                else:
-                    df_merge[c] = "-"
-
-        df_out = df_merge[cols_final].rename(columns={'SOPT_NO_FINAL': 'SOPT_NO'})
-        df_out.to_excel(OUTPUT_FILE, index=False)
-        print(f"\nSELESAI! Hasil: {OUTPUT_FILE}")
+        # Buat kolom NO dummy
+        df_merge['NO'] = df_merge.index + 1
         
-    except Exception as e:
-        print(f"\n[ERROR CRITICAL] {e}")
+        # Mapping nama kolom agar sesuai request user
+        final_df = pd.DataFrame()
+        
+        for col in target_cols:
+            if col == 'NO_SOPT_FIX':
+                final_df['SOPT_NO'] = df_merge['NO_SOPT_FIX']
+            elif col == 'ALAMAT_REF':
+                final_df['DOORING_ADDRESS'] = df_merge['ALAMAT_REF']
+            elif col == 'SIZE CONT':
+                final_df['SIZE CONT'] = df_merge['SIZE_CONT_FIX']
+            elif col in df_merge.columns:
+                final_df[col] = df_merge[col]
+            else:
+                # Coba cari variasi nama kolom di data asli
+                found = False
+                for c_orig in df_merge.columns:
+                    if col.replace(" 1", "") in c_orig: # Misal AREA AMBIL EMPTY 1 -> AREA AMBIL EMPTY
+                        final_df[col] = df_merge[c_orig]
+                        found = True
+                        break
+                if not found:
+                    final_df[col] = "-"
+                    
+        final_df.to_excel(OUTPUT_FILE, index=False)
+        print(f"\nSELESAI! Hasil disimpan di: {OUTPUT_FILE}")
