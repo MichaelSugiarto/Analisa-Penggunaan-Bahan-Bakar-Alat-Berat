@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
 import re
 import os
 import warnings
@@ -16,7 +17,7 @@ FILE_TRUCKING = "HasilTrucking.xlsx"
 FILE_NON_TRUCKING = "HasilNonTrucking.xlsx"
 OUTPUT_EXCEL = "Forecast_Detail_Data.xlsx"
 
-print("=== START FORECASTING (FIXED: LITER CALCULATION & TRONTON DETECTION) ===\n")
+print("=== START FORECASTING (FIXED: LITER, PISAH KOLOM AKURASI & ERROR) ===\n")
 
 # ==============================================================================
 # FUNGSI HELPER
@@ -67,12 +68,12 @@ if os.path.exists(FILE_MASTER):
     except Exception as e: print(f"   [ERROR] Load Master: {e}")
 
 # ==============================================================================
-# 2. BACA BBM AAB (MODIFIKASI: BACA LITER & FILTER TOTAL)
+# 2. BACA BBM AAB (PISAH HM & LITER, FILTER TOTAL)
 # ==============================================================================
-print("2. Membaca BBM AAB (HM & LITER with Total Filter)...")
+print("2. Membaca BBM AAB (Mengekstrak HM dan LITER)...")
 target_sheets = ['JAN', 'FEB', 'MAR', 'APR', 'MEI', 'JUN', 'JUL', 'AGT', 'SEP', 'OKT', 'NOV']
-# Dictionary untuk menyimpan: { 'UNIT_NAME': {'HM': [df...], 'LITER': [df...]} }
-bbm_data_store = {} 
+hm_data_store = {}
+liter_data_store = {}
 
 if os.path.exists(FILE_BBM):
     xls = pd.ExcelFile(FILE_BBM)
@@ -86,7 +87,6 @@ if os.path.exists(FILE_BBM):
             for col in range(1, df.shape[1]):
                 header_str = str(headers[col]).strip().upper()
                 
-                # Deteksi Kolom HM dan LITER (Termasuk variasi nama kolom)
                 is_hm = (header_str == 'HM')
                 is_liter = (header_str in ['LITER', 'KELUAR', 'PEMAKAIAN', 'SOLAR'])
                 
@@ -98,32 +98,26 @@ if os.path.exists(FILE_BBM):
                     vals = pd.to_numeric(df.iloc[3:, col], errors='coerce')
                     clean_key = clean_unit_name(raw_u)
                     
-                    if clean_key not in bbm_data_store: 
-                        bbm_data_store[clean_key] = {'HM': [], 'LITER': []}
-                    
                     temp = pd.DataFrame({'Date': dates, 'Value': vals})
                     
-                    # --- FILTER PENTING: BUANG BARIS TOTAL/AVG ---
-                    # 1. Drop jika tanggal kosong
+                    # FILTER BARIS TOTAL/AVG
                     temp.dropna(subset=['Date'], inplace=True)
-                    # 2. Cek apakah ada string "Total" atau "Avg" di kolom tanggal
                     mask_summary = temp['Date'].astype(str).str.contains(r'TOTAL|AVG|AVERAGE|GRAND', case=False, na=False)
                     temp = temp[~mask_summary]
-                    # 3. Konversi ke Datetime (yang gagal/string aneh jadi NaT)
                     temp['Date'] = pd.to_datetime(temp['Date'], dayfirst=True, errors='coerce')
-                    # 4. Drop NaT
                     temp.dropna(subset=['Date'], inplace=True)
-                    # ---------------------------------------------
                     
                     if is_hm:
-                        bbm_data_store[clean_key]['HM'].append(temp)
+                        if clean_key not in hm_data_store: hm_data_store[clean_key] = []
+                        hm_data_store[clean_key].append(temp)
                     else:
-                        bbm_data_store[clean_key]['LITER'].append(temp)
+                        if clean_key not in liter_data_store: liter_data_store[clean_key] = []
+                        liter_data_store[clean_key].append(temp)
 
-print(f"   -> Terbaca {len(bbm_data_store)} unit unik di BBM AAB (HM & Liter terpisah).")
+print(f"   -> Terbaca {len(hm_data_store)} unit HM dan {len(liter_data_store)} unit LITER.")
 
 # ==============================================================================
-# 3. FUNGSI LOGIC (MATCHING & CALCULATION)
+# 3. FUNGSI LOGIC PENCARIAN & PENENTUAN TIPE
 # ==============================================================================
 def find_matching_hm_unit(ops_unit_name, bbm_keys):
     clean_ops = clean_unit_name(ops_unit_name)
@@ -139,7 +133,7 @@ def find_matching_hm_unit(ops_unit_name, bbm_keys):
     if "BOSS" in clean_ops and "TOP" in clean_ops:
         for k in bbm_keys:
             if "WIND RIVER" in k: return k
-    
+            
     if clean_ops in bbm_keys: return clean_ops
     for k in bbm_keys:
         if len(clean_ops) > 3 and clean_ops in k: return k
@@ -155,28 +149,46 @@ def find_matching_hm_unit(ops_unit_name, bbm_keys):
             if bb == clean_ops or (len(bb)>3 and bb in clean_ops): return k
     return None
 
-def resolve_unit_type_fixed(raw_u, m_key, master_data_map):
-    # FIX: TRONTON DETECTION
-    raw_u_upper = str(raw_u).upper()
-    if "PA 8511 AH" in raw_u_upper or "PA8511AH" in clean_unit_name(raw_u): return "TRONTON"
-    if "L 8568 UK" in raw_u_upper or "L8568UK" in clean_unit_name(raw_u): return "TRONTON"
+def resolve_unit_type(unit_name, matched_bbm_key, master_map):
+    clean_ops = clean_unit_name(unit_name)
+    # Force Tronton Logic
+    if "PA 8511 AH" in clean_ops: return "TRONTON"
+    if "L 8568 UK" in clean_ops: return "TRONTON"
 
-    if m_key and m_key in master_data_map:
-        return normalize_type(master_data_map[m_key]['Jenis_Alat'])
+    utype = "OTHERS"
     
-    # Fallback Logic
-    if "TRONTON" in raw_u_upper: return "TRONTON"
-    if re.search(r'L\s*\d+', raw_u_upper) or "TRAILER" in raw_u_upper: return "TRAILER"
-    if "REACH" in raw_u_upper or "STACKER" in raw_u_upper: return "REACH STACKER"
-    if "FORKLIFT" in raw_u_upper: return "FORKLIFT"
-    if "CRANE" in raw_u_upper: return "CRANE"
-    if "SIDE" in raw_u_upper: return "SIDE LOADER"
-    if "TOP" in raw_u_upper: return "TOP LOADER"
+    # 1. Cek langsung nama ke Master
+    if clean_ops in master_map:
+        utype = normalize_type(master_map[clean_ops]['Jenis_Alat'])
+        
+    # 2. Cek Key dari BBM
+    if utype == "OTHERS" and matched_bbm_key and matched_bbm_key in master_map:
+        utype = normalize_type(master_map[matched_bbm_key]['Jenis_Alat'])
+        
+    # 3. Cek Nama EX
+    if utype == "OTHERS":
+        target_names = [unit_name, matched_bbm_key]
+        for name in target_names:
+            if name and ("EX." in name or " EX " in name):
+                parts = re.split(r'EX\.| EX ', name)
+                if len(parts) > 1:
+                    old_name = clean_unit_name(parts[1].replace(')', '').strip())
+                    if old_name in master_map:
+                        t = normalize_type(master_map[old_name]['Jenis_Alat'])
+                        if t != "OTHERS":
+                            utype = t
+                            break
+
+    if utype != "OTHERS":
+        return utype
+
+    # 4. Fallback (Penyelamat)
+    if "TRONTON" in clean_ops: return "TRONTON"
+    if "TRAILER" in clean_ops or re.search(r'L\s*\d+', clean_ops): return "TRAILER"
     
     return "OTHERS"
 
-# Hitung HM (Delta)
-def calculate_monthly_hm(df_list):
+def calculate_monthly_hm_for_unit(df_list):
     if not df_list: return pd.DataFrame()
     df = pd.concat(df_list, ignore_index=True).sort_values('Date')
     df['HM_Clean'] = df['Value'].replace(0, np.nan).ffill().fillna(0)
@@ -186,8 +198,7 @@ def calculate_monthly_hm(df_list):
     df['Month_Num'] = df['Date'].dt.month
     return df.groupby('Month_Num')['Delta_HM'].sum().reset_index()
 
-# Hitung LITER (Sum Murni)
-def calculate_monthly_liter(df_list):
+def calculate_monthly_liter_for_unit(df_list):
     if not df_list: return pd.DataFrame()
     df = pd.concat(df_list, ignore_index=True).sort_values('Date')
     df['Value'] = df['Value'].fillna(0)
@@ -197,56 +208,50 @@ def calculate_monthly_liter(df_list):
 # ==============================================================================
 # 4. PREPARE DATA
 # ==============================================================================
-print("3. Mengolah Data (Trucking & Non-Trucking) & Recalculate Liter...")
-
-# --- TRUCKING ---
+print("3. Mengolah Data (Trucking & Non-Trucking) & Menghitung Ulang Liter...")
 df_truck = pd.DataFrame()
 if os.path.exists(FILE_TRUCKING):
     df_tr_raw = pd.read_excel(FILE_TRUCKING, sheet_name='Data_Bulanan')
     df_tr_raw = df_tr_raw[df_tr_raw['Bulan'].astype(str).str.strip().isin(['Oktober', 'November'])]
     tr_list = []
     month_map_rev = {'Oktober': 10, 'November': 11}
-    bbm_keys = list(bbm_data_store.keys())
+    bbm_keys = list(set(list(hm_data_store.keys()) + list(liter_data_store.keys())))
     
     for _, r in df_tr_raw.iterrows():
         raw_u = str(r['Nama_Unit'])
         m_key = find_matching_hm_unit(raw_u, bbm_keys)
-        utype = resolve_unit_type_fixed(raw_u, m_key, master_data_map)
+        utype = resolve_unit_type(raw_u, m_key, master_data_map)
         
         if utype in ['TRAILER', 'TRONTON']:
             m_num = month_map_rev.get(r['Bulan'].strip())
-            
             hm_val = 0
-            liter_val = 0 # Default 0 (akan diisi dari Raw Data)
+            
+            # Ambil LITER dari report sebagai cadangan
+            liter_val = r['LITER'] if 'LITER' in df_tr_raw.columns and pd.notna(r['LITER']) else 0
             
             if m_key:
-                # Get HM
-                if bbm_data_store[m_key]['HM']:
-                    res_hm = calculate_monthly_hm(bbm_data_store[m_key]['HM'])
+                if m_key in hm_data_store:
+                    res_hm = calculate_monthly_hm_for_unit(hm_data_store[m_key])
                     if not res_hm.empty:
                         row_hm = res_hm[res_hm['Month_Num'] == m_num]
                         if not row_hm.empty: hm_val = row_hm['Delta_HM'].values[0]
                 
-                # Get LITER (RECALCULATED)
-                if bbm_data_store[m_key]['LITER']:
-                    res_lit = calculate_monthly_liter(bbm_data_store[m_key]['LITER'])
+                # Replace Liter dengan data asli (yang sudah bebas dari baris total)
+                if m_key in liter_data_store:
+                    res_lit = calculate_monthly_liter_for_unit(liter_data_store[m_key])
                     if not res_lit.empty:
                         row_lit = res_lit[res_lit['Month_Num'] == m_num]
-                        if not row_lit.empty: liter_val = row_lit['Value'].values[0]
-            
-            # Jika Liter dari RAW tetap 0, bisa fallback ke report r['LITER']
-            # Tapi user minta perbaiki perhitungan, jadi kita percaya RAW dulu.
+                        if not row_lit.empty: 
+                            calc_lit = row_lit['Value'].values[0]
+                            if calc_lit > 0: liter_val = calc_lit
             
             tr_list.append({
                 'Category': 'TRUCKING', 'Type': utype, 'Unit_Clean': raw_u,
-                'Month_Num': m_num, 
-                'LITER': liter_val, # Using Recalculated Value
-                'Workload': r['Total_TonKm'],
+                'Month_Num': m_num, 'LITER': liter_val, 'Workload': r.get('Total_TonKm', 0),
                 'Ton': 0, 'HM': hm_val
             })
     df_truck = pd.DataFrame(tr_list)
 
-# --- NON-TRUCKING ---
 df_nt = pd.DataFrame()
 if os.path.exists(FILE_NON_TRUCKING):
     df_nt_raw = pd.read_excel(FILE_NON_TRUCKING, sheet_name='Data_Bulanan')
@@ -256,54 +261,51 @@ if os.path.exists(FILE_NON_TRUCKING):
                 'Juli':7, 'Agustus':8, 'September':9, 'Oktober':10, 'November':11}
     col_u = 'Unit_Name' if 'Unit_Name' in df_nt_raw.columns else 'Nama_Unit'
     nt_list = []
-    bbm_keys = list(bbm_data_store.keys())
+    bbm_keys = list(set(list(hm_data_store.keys()) + list(liter_data_store.keys())))
     
     for _, r in df_nt_raw.iterrows():
         raw_u = str(r[col_u])
         m_key = find_matching_hm_unit(raw_u, bbm_keys)
+        utype = resolve_unit_type(raw_u, m_key, master_data_map)
         
-        utype = "OTHERS"
-        if 'Jenis_Alat' in df_nt_raw.columns and pd.notna(r['Jenis_Alat']):
+        if utype == "OTHERS" and 'Jenis_Alat' in df_nt_raw.columns and pd.notna(r['Jenis_Alat']):
             utype = normalize_type(r['Jenis_Alat'])
-        elif m_key and m_key in master_data_map:
-             utype = normalize_type(master_data_map[m_key]['Jenis_Alat'])
              
         if utype in ['REACH STACKER','FORKLIFT','CRANE','SIDE LOADER','TOP LOADER']:
             m_num = m_map_id.get(r['Bulan'])
             hm_val = 0
-            liter_val = 0
+            
+            # Fallback
+            liter_val = r['LITER'] if 'LITER' in df_nt_raw.columns and pd.notna(r['LITER']) else 0
             
             if m_key:
-                # Get HM
-                if bbm_data_store[m_key]['HM']:
-                    res_hm = calculate_monthly_hm(bbm_data_store[m_key]['HM'])
+                if m_key in hm_data_store:
+                    res_hm = calculate_monthly_hm_for_unit(hm_data_store[m_key])
                     if not res_hm.empty:
                         row_hm = res_hm[res_hm['Month_Num'] == m_num]
                         if not row_hm.empty: hm_val = row_hm['Delta_HM'].values[0]
-                
-                # Get LITER (RECALCULATED)
-                if bbm_data_store[m_key]['LITER']:
-                    res_lit = calculate_monthly_liter(bbm_data_store[m_key]['LITER'])
+                        
+                if m_key in liter_data_store:
+                    res_lit = calculate_monthly_liter_for_unit(liter_data_store[m_key])
                     if not res_lit.empty:
                         row_lit = res_lit[res_lit['Month_Num'] == m_num]
-                        if not row_lit.empty: liter_val = row_lit['Value'].values[0]
+                        if not row_lit.empty: 
+                            calc_lit = row_lit['Value'].values[0]
+                            if calc_lit > 0: liter_val = calc_lit
             
             nt_list.append({
                 'Category': 'NON-TRUCKING', 'Type': utype, 'Unit_Clean': raw_u,
-                'Month_Num': m_num, 
-                'LITER': liter_val, # Using Recalculated Value
-                'Ton': r['Total_Ton'],
+                'Month_Num': m_num, 'LITER': liter_val, 'Ton': r.get('Total_Ton', 0),
                 'Workload': 0, 'HM': hm_val
             })
     df_nt = pd.DataFrame(nt_list)
 
 # ==============================================================================
-# 5. FORECASTING ENGINE
+# 5. FORECASTING ENGINE DENGAN AKURASI/ERROR
 # ==============================================================================
-print("4. Menjalankan Forecasting Hybrid (Filter Active)...")
+print("4. Menjalankan Forecasting Hybrid & Hitung Akurasi...")
 df_final = pd.concat([df_truck, df_nt], ignore_index=True)
 
-# Tambahkan Status Analisa
 df_final['Status_Analisa'] = 'Tidak Masuk Analisa'
 condition_active = (df_final['LITER'] > 0) & ((df_final['Workload'] > 0) | (df_final['Ton'] > 0))
 df_final.loc[condition_active, 'Status_Analisa'] = 'Masuk Analisa'
@@ -321,9 +323,12 @@ configs = [
 forecast_detail_list = []
 
 for cfg in configs:
-    sub_full = df_final[(df_final['Category']==cfg['cat']) & (df_final['Type']==cfg['type']) & (df_final['Month_Num'].isin(cfg['range']))]
+    sub_full = df_final[
+        (df_final['Category']==cfg['cat']) & 
+        (df_final['Type']==cfg['type']) & 
+        (df_final['Month_Num'].isin(cfg['range']))
+    ]
     
-    # Hanya data valid untuk membangun Tren
     sub_analysis = sub_full[sub_full['Status_Analisa'] == 'Masuk Analisa']
     
     agg = sub_analysis.groupby('Month_Num').agg({
@@ -332,6 +337,7 @@ for cfg in configs:
     
     forecast_base = 0
     valid_model = False
+    r2_model = 0.0 # Indikator Akurasi Trend Rata-rata
     
     if len(agg) >= 2:
         for col in cfg['preds'] + ['LITER']:
@@ -351,12 +357,17 @@ for cfg in configs:
         y_train = agg['LITER_Per_Unit']
         rm.fit(X_train, y_train)
         
+        # Hitung R-Squared (Akurasi Base Model)
+        y_pred_train = rm.predict(X_train)
+        if len(y_train) > 1 and np.var(y_train) > 0:
+            r2_model = r2_score(y_train, y_pred_train)
+        
         X_pred = [pred_activity[p] for p in cfg['preds']]
         forecast_base = max(0, rm.predict([X_pred])[0])
         valid_model = True
 
-    # Hitung per unit
     unique_units = sub_full['Unit_Clean'].unique()
+    
     for unit in unique_units:
         unit_history = sub_full[sub_full['Unit_Clean'] == unit]
         
@@ -372,28 +383,44 @@ for cfg in configs:
             correction_factor = np.mean(ratios)
             correction_factor = max(0.5, min(2.0, correction_factor))
             
+        # Hitung Simpangan Error (Fluktuasi Kinerja Unit)
+        ratio_variance = np.std(ratios) if len(ratios) > 1 else 0.0
+            
         final_forecast = (forecast_base * correction_factor) if valid_model else 0
         
         note = "Data Kurang/Tidak Masuk Analisa"
-        if valid_model and ratios:
-            trend_str = "Standard"
-            if correction_factor > 1.05: trend_str = f"Boros ({correction_factor:.2f}x)"
-            elif correction_factor < 0.95: trend_str = f"Irit ({correction_factor:.2f}x)"
-            note = f"General -> {trend_str}"
-        elif valid_model and not ratios:
-            note = "Tidak ada history valid, pakai rata-rata general"
+        if valid_model:
+            if ratios:
+                trend_str = "Standard"
+                if correction_factor > 1.05: trend_str = f"Boros ({correction_factor:.2f}x)"
+                elif correction_factor < 0.95: trend_str = f"Irit ({correction_factor:.2f}x)"
+                note = f"General -> {trend_str}"
+            else:
+                note = "Tidak ada history valid, pakai rata-rata general"
+                
+        # --- PENULISAN AKURASI (DALAM BENTUK ANGKA) ---
+        error_margin_val = round(ratio_variance * 100, 2) if len(ratios) > 1 else None
+        r2_val = round(r2_model, 2) if valid_model else None
         
         forecast_detail_list.append({
-            'Category': cfg['cat'], 'Type': cfg['type'], 'Unit_Name': unit,
+            'Category': cfg['cat'], 
+            'Type': cfg['type'], 
+            'Unit_Name': unit,
             'Correction_Factor': round(correction_factor, 2),
-            'Forecast_LITER_Dec': round(final_forecast, 2), 'Note': note
+            'Forecast_LITER_Dec': round(final_forecast, 2), 
+            'Akurasi_General_R2': r2_val,                # Kolom Numerik
+            'Error_Fluktuasi_Unit_Pct': error_margin_val, # Kolom Numerik
+            'Note': note
         })
 
+# ==============================================================================
+# 6. EXPORT HASIL
+# ==============================================================================
 df_res_detail = pd.DataFrame(forecast_detail_list)
 with pd.ExcelWriter(OUTPUT_EXCEL) as writer:
     df_res_detail.to_excel(writer, sheet_name='Forecast_Per_Unit', index=False)
     df_final.to_excel(writer, sheet_name='Data_Source_Detail', index=False)
 
-print("\n=== CONTOH HASIL FORECAST PER UNIT (HYBRID) ===")
-print(df_res_detail.head(10))
+print("\n=== CONTOH HASIL FORECAST PER UNIT (SUDAH KEMBALI NORMAL & AKURAT) ===")
+print(df_res_detail.head(5))
 print(f"\nFile Detail tersimpan: {OUTPUT_EXCEL}")
