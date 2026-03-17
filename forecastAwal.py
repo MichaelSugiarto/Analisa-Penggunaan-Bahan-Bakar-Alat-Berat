@@ -17,7 +17,7 @@ FILE_TRUCKING = "HasilTrucking.xlsx"
 FILE_NON_TRUCKING = "HasilNonTrucking.xlsx"
 OUTPUT_EXCEL = "Forecast_Detail_Data.xlsx"
 
-print("=== START FORECASTING (FINAL FIX: CONSTRAINED CAUSAL MODEL) ===\n")
+print("=== START FORECASTING (FINAL FIX: CONSTRAINED CAUSAL MODEL & CV ERROR) ===\n")
 
 # ==============================================================================
 # FUNGSI HELPER 
@@ -87,20 +87,18 @@ def get_master_match(raw_name):
         if c_after in master_data_map: return c_after
         for m_key in master_keys_set:
             if c_after != "" and c_after in m_key: return m_key
-    return c_raw # Fallback ke clean name
+    return c_raw 
 
 # ==============================================================================
 # 2. BACA BBM AAB (KHUSUS UNTUK MENGAMBIL HM SECARA SERIES)
 # ==============================================================================
-print("2. Membaca BBM AAB (Mengekstrak HM & Liter)...")
+print("2. Membaca BBM AAB (Mengekstrak TimeSeries HM)...")
 hm_data_store = {}
-liter_data_store = {}
 
 if os.path.exists(FILE_BBM):
     xls = pd.ExcelFile(FILE_BBM)
     for sheet_name in xls.sheet_names:
         sht_up = sheet_name.upper()
-        # Ambil semua bulan (karena Non-Trucking butuh dari Jan-Nov)
         
         df_cek = pd.read_excel(xls, sheet_name=sheet_name, header=None, nrows=3)
         if df_cek.empty: continue
@@ -108,10 +106,18 @@ if os.path.exists(FILE_BBM):
         if "EQUIP" not in a1_val and "NAMA" not in a1_val: continue 
             
         df_full = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-        unit_names_row = df_full.iloc[0].ffill() 
-        group_kpi_row = df_full.iloc[1].ffill()  
-        headers = df_full.iloc[2]                
-        data_rows = df_full.iloc[3:]             
+        
+        r_eq, r_kpi, r_hd = 0, 1, 2
+        for idx in range(min(10, len(df_full))):
+            row_str = df_full.iloc[idx].astype(str).str.upper()
+            if row_str.str.contains('EQUIP NAME').any(): r_eq = idx
+            if row_str.str.contains('GROUP KPI').any(): r_kpi = idx
+            if row_str.str.contains('HM').any(): r_hd = idx
+                
+        unit_names_row = df_full.iloc[r_eq].ffill() 
+        group_kpi_row = df_full.iloc[r_kpi].ffill()  
+        headers = df_full.iloc[r_hd]                
+        data_rows = df_full.iloc[r_hd+1:]             
         
         def is_valid_date_row(val):
             if pd.isna(val): return False
@@ -125,11 +131,9 @@ if os.path.exists(FILE_BBM):
         valid_mask = data_rows.iloc[:, 0].apply(is_valid_date_row)
         valid_data_rows = data_rows[valid_mask]
         
-        # Ekstrak kolom tanggal untuk TimeSeries HM
         dates_raw = valid_data_rows.iloc[:, 0]
         
-        # Berikan tahun dummy jika hanya angka tanggal agar bisa diparse sebagai datetime
-        month_idx = {'JAN':1, 'FEB':2, 'MAR':3, 'APR':4, 'MEI':5, 'JUN':6, 'JUL':7, 'AGT':8, 'SEP':9, 'OKT':10, 'NOV':11}
+        month_idx = {'JAN':1, 'FEB':2, 'MAR':3, 'APR':4, 'MEI':5, 'JUN':6, 'JUL':7, 'AGT':8, 'SEP':9, 'OKT':10, 'NOV':11, 'DES': 12}
         cur_month = next((v for k,v in month_idx.items() if k in sht_up), 1)
         
         dates_parsed = []
@@ -142,34 +146,27 @@ if os.path.exists(FILE_BBM):
         for col in range(1, df_full.shape[1]):
             header_str = str(headers.iloc[col]).strip().upper()
             is_hm = (header_str == 'HM')
-            is_liter = ('LITER' in header_str)
             
-            if is_hm or is_liter:
+            if is_hm:
                 raw_equip = str(unit_names_row.iloc[col]).strip().upper()
                 raw_kpi = str(group_kpi_row.iloc[col]).strip().upper()
                 
                 if "TOTAL" in raw_equip or "UNNAMED" in raw_equip or raw_equip == "NAN": continue
                 
-                # Ekstrak Lambung dan Standarisasi Nama
                 lambung = extract_lambung_code(raw_kpi)
                 std_match = get_master_match(raw_equip)
                 final_clean_key = std_match if std_match in master_data_map else clean_unit_name(lambung if lambung else raw_equip)
                 
-                # Ambil Array Data (Series per Hari)
                 vals = pd.to_numeric(valid_data_rows.iloc[:, col], errors='coerce')
                 
                 temp = pd.DataFrame({'Date': dates_series, 'Value': vals.values})
                 temp.dropna(subset=['Date'], inplace=True)
                 
-                if is_hm:
-                    if final_clean_key not in hm_data_store: hm_data_store[final_clean_key] = []
-                    hm_data_store[final_clean_key].append(temp)
-                else:
-                    if final_clean_key not in liter_data_store: liter_data_store[final_clean_key] = []
-                    liter_data_store[final_clean_key].append(temp)
+                if final_clean_key not in hm_data_store: hm_data_store[final_clean_key] = []
+                hm_data_store[final_clean_key].append(temp)
 
 # ==============================================================================
-# 3. FUNGSI LOGIC BANTUAN
+# 3. FUNGSI LOGIC BANTUAN (CONTINUOUS ROLLING DIFF)
 # ==============================================================================
 def resolve_unit_type(clean_ops, master_map):
     utype = "OTHERS"
@@ -182,12 +179,18 @@ def resolve_unit_type(clean_ops, master_map):
     return "OTHERS"
 
 def calculate_monthly_hm_for_unit(df_list):
+    """
+    Metode Continuous Rolling Diff: Menghitung selisih harian riil berkesinambungan
+    """
     if not df_list: return pd.DataFrame()
+    
     df = pd.concat(df_list, ignore_index=True).sort_values('Date')
-    df['HM_Clean'] = df['Value'].replace(0, np.nan).ffill().fillna(0)
+    df['HM_Clean'] = pd.to_numeric(df['Value'], errors='coerce').replace(0, np.nan).ffill().fillna(0)
     df['Delta_HM'] = df['HM_Clean'].diff().fillna(0)
+    
     df.loc[df['Delta_HM'] < 0, 'Delta_HM'] = 0
-    df.loc[df['Delta_HM'] > 100, 'Delta_HM'] = 0 # Sanity Check HM
+    df.loc[df['Delta_HM'] > 100, 'Delta_HM'] = 0 
+    
     df['Month_Num'] = df['Date'].dt.month
     return df.groupby('Month_Num')['Delta_HM'].sum().reset_index()
 
@@ -198,7 +201,6 @@ print("3. Mengolah Data (Trucking & Non-Trucking)...")
 df_truck = pd.DataFrame()
 if os.path.exists(FILE_TRUCKING):
     df_tr_raw = pd.read_excel(FILE_TRUCKING, sheet_name='Data_Bulanan')
-    # Filter Hanya Oktober & November yang relevan untuk Truk
     df_tr_raw = df_tr_raw[df_tr_raw['Bulan'].astype(str).str.strip().isin(['Oktober', 'November'])]
     tr_list = []
     month_map_rev = {'Oktober': 10, 'November': 11}
@@ -212,7 +214,6 @@ if os.path.exists(FILE_TRUCKING):
         hm_val = 0
         liter_val = r['LITER'] if 'LITER' in df_tr_raw.columns and pd.notna(r['LITER']) else 0 
         
-        # Tarik data HM dari store yang sudah dicleaning
         if clean_u in hm_data_store:
             res_hm = calculate_monthly_hm_for_unit(hm_data_store[clean_u])
             if not res_hm.empty:
@@ -245,7 +246,6 @@ if os.path.exists(FILE_NON_TRUCKING):
             m_num = m_map_id.get(r['Bulan'].strip())
             hm_val = 0
             
-            # Tarik HM untuk Alat Berat
             if clean_u in hm_data_store:
                 res_hm = calculate_monthly_hm_for_unit(hm_data_store[clean_u])
                 if not res_hm.empty:
@@ -262,7 +262,7 @@ if os.path.exists(FILE_NON_TRUCKING):
     df_nt = pd.DataFrame(nt_list)
 
 # ==============================================================================
-# 5. FORECASTING ENGINE (CONSTRAINED CAUSAL MODEL)
+# 5. FORECASTING ENGINE (CONSTRAINED CAUSAL MODEL & CV ERROR)
 # ==============================================================================
 print("4. Menjalankan Forecasting Engine...")
 df_final = pd.concat([df_truck, df_nt], ignore_index=True)
@@ -305,7 +305,7 @@ for cfg in configs:
         unit_history = sub[sub['Unit_Clean'] == unit]
         unit_pred_act = {}
         
-        # Forecast Aktivitas Unit untuk Bulan Desember
+        # 1. Forecast Aktivitas Unit
         for p in cfg['preds']:
             act_series = unit_history[['Month_Num', p]].dropna()
             if len(act_series) >= 2 and act_series[p].sum() > 0:
@@ -318,34 +318,42 @@ for cfg in configs:
             else:
                 unit_pred_act[p] = 0
                 
-        # Hitung Normal LITER berdasarkan Regresi General Armada
         expected_liter_normal = 0
         if valid_model:
             X_pred = [unit_pred_act.get(p, 0) for p in cfg['preds']]
             expected_liter_normal = max(0, rm.predict([X_pred])[0])
             
-        # Constrained Efficiency Factor (Batas: 0.8x s/d 1.2x Rata-rata Normal)
+        # 2. Mengukur Efisiensi (Dengan Perlindungan Zero Denominator)
         ratios_eff = []
+        actual_lits = []
+        
         for _, row in unit_history.iterrows():
-            m_num = row['Month_Num']
             X_hist = [row[p] for p in cfg['preds']]
+            actual_lit = row['LITER']
+            
             if valid_model and sum(X_hist) > 0:
-                normal_hist = max(1, rm.predict([X_hist])[0])
-                actual_lit = row['LITER']
+                # SAFEGUARD: Batas minimal normal_hist di-set ke 10 Liter (Cegah pembagian nol)
+                normal_hist = max(10, rm.predict([X_hist])[0])
                 ratios_eff.append(actual_lit / normal_hist)
+                actual_lits.append(actual_lit)
                 
         eff_factor = 1.0
         final_forecast = 0
         note = "Data Kurang"
-        ratio_variance = 0
+        error_margin_val = None
         
         if valid_model and expected_liter_normal > 0:
             if ratios_eff:
                 eff_factor = np.mean(ratios_eff)
-                ratio_variance = np.std(ratios_eff)
-                # Batas aman faktor irit/boros maksimal 20% deviasi dari Standar Armada
-                eff_factor = max(0.80, min(1.20, eff_factor))
+                eff_factor = max(0.80, min(1.20, eff_factor)) # Maksimal deviasi faktor 20%
                 
+                # PERBAIKAN: Menggunakan Coefficient of Variation (CV) untuk error kestabilan
+                if len(actual_lits) > 1 and np.mean(actual_lits) > 0:
+                    cv = np.std(actual_lits) / np.mean(actual_lits)
+                    error_margin_val = round(cv * 100, 2)
+                else:
+                    error_margin_val = 0.0
+                    
             final_forecast = expected_liter_normal * eff_factor
             
             if ratios_eff:
@@ -354,11 +362,9 @@ for cfg in configs:
                 elif eff_factor < 0.95: trend_str = f"Irit"
                 note = f"General -> {trend_str}"
             else:
-                note = "Tidak ada history valid, pakai rata-rata general"
+                note = "Tidak ada history valid (Nol Ops), pakai general"
                 
-        error_margin_val = round(ratio_variance * 100, 2) if len(ratios_eff) > 1 else None
         r2_val = round(r2_model, 2) if valid_model else None
-        
         pred_wl_ton = unit_pred_act.get('Workload', unit_pred_act.get('Ton', 0))
         
         forecast_detail_list.append({
