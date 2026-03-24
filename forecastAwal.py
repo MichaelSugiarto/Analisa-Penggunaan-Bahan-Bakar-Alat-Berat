@@ -17,7 +17,7 @@ FILE_TRUCKING = "HasilTrucking.xlsx"
 FILE_NON_TRUCKING = "HasilNonTrucking.xlsx"
 OUTPUT_EXCEL = "Forecast_Detail_Data.xlsx"
 
-print("=== START FORECASTING (FINAL FIX: CONSTRAINED CAUSAL MODEL & CV ERROR) ===\n")
+print("=== START FORECASTING (FINAL FIX: MURNI ML & PABRIK SEBAGAI PEMBANDING) ===\n")
 
 # ==============================================================================
 # FUNGSI HELPER 
@@ -50,10 +50,79 @@ def normalize_type(t_str):
     if "TOP" in t: return "TOP LOADER"
     return "OTHERS"
 
+# =========================================================================================
+# KNOWLEDGE BASE AI: KAMUS STANDAR PABRIK DENGAN LOGIKA SFC (INTERVAL LOW - HIGH LOAD)
+# =========================================================================================
+def get_standar_pabrik_liter(jenis, merk, cap, hp, hm_pred):
+    jenis = str(jenis).upper()
+    merk = str(merk).upper()
+    try: cap = float(cap)
+    except: cap = 0.0
+    try: hp = float(hp)
+    except: hp = 0.0
+    
+    base_l_per_hm = 0.0
+    
+    # 1. Pendekatan Utama Berdasarkan HP (Horse Power) dan Load Factor
+    if hp > 0:
+        # Load Factor Baseline (Medium)
+        if 'REACH STACKER' in jenis: load_factor = 0.055
+        elif 'FORKLIFT' in jenis: load_factor = 0.045
+        elif 'LOADER' in jenis: load_factor = 0.050
+        elif 'CRANE' in jenis: load_factor = 0.040
+        elif 'TRAILER' in jenis or 'HEAD' in jenis: load_factor = 0.020 
+        elif 'TRONTON' in jenis: load_factor = 0.018
+        else: load_factor = 0.04
+        
+        # Modifier Teknologi Mesin 
+        if 'KALMAR' in merk or 'VOLVO' in merk or 'SCANIA' in merk: load_factor *= 0.95 
+        elif 'SANY' in merk or 'WEICHAI' in merk: load_factor *= 1.05 
+        elif 'HINO' in merk or 'ISUZU' in merk: load_factor *= 0.98 
+        
+        base_l_per_hm = hp * load_factor
+        
+    # 2. Pendekatan Fallback (Jika Data HP Tidak Tersedia)
+    else:
+        if 'REACH STACKER' in jenis:
+            if 'KALMAR' in merk: base_l_per_hm = 16.5
+            elif 'SANY' in merk: base_l_per_hm = 15.0
+            elif 'KONE' in merk: base_l_per_hm = 17.0
+            elif 'LINDE' in merk: base_l_per_hm = 16.0
+            else: base_l_per_hm = 16.0
+        elif 'FORKLIFT' in jenis:
+            if cap >= 25: base_l_per_hm = 9.0
+            elif cap >= 10: base_l_per_hm = 6.5
+            elif cap >= 5: base_l_per_hm = 4.0
+            else: base_l_per_hm = 2.5
+        elif 'LOADER' in jenis: 
+            if 'KALMAR' in merk: base_l_per_hm = 14.5
+            elif 'SANY' in merk: base_l_per_hm = 13.5
+            else: base_l_per_hm = 14.0
+        elif 'CRANE' in jenis:
+            if cap >= 70: base_l_per_hm = 14.0
+            elif cap >= 40: base_l_per_hm = 10.0
+            else: base_l_per_hm = 8.0
+        elif 'TRAILER' in jenis or 'HEAD' in jenis:
+            if 'HINO' in merk: base_l_per_hm = 5.5
+            elif 'ISUZU' in merk: base_l_per_hm = 5.0
+            elif 'UD' in merk or 'NISSAN' in merk: base_l_per_hm = 5.8
+            elif 'MERCEDES' in merk or 'BENZ' in merk: base_l_per_hm = 6.0
+            else: base_l_per_hm = 5.5
+        elif 'TRONTON' in jenis:
+            base_l_per_hm = 4.5
+        else:
+            base_l_per_hm = 5.0 
+            
+    # Interval ± 15% untuk mewakili Low Load (Ringan) hingga High Load (Berat)
+    min_l_per_hm = base_l_per_hm * 0.85
+    max_l_per_hm = base_l_per_hm * 1.15
+    
+    return hm_pred * min_l_per_hm, hm_pred * max_l_per_hm
+
 # ==============================================================================
-# 1. LOAD MASTER DATA
+# 1. LOAD MASTER DATA (PLUS MERK, KAPASITAS, & HP)
 # ==============================================================================
-print("1. Loading Master Data untuk standarisasi nama...")
+print("1. Loading Master Data untuk standarisasi nama, merk, hp, dan kapasitas...")
 master_data_map = {}
 master_keys_set = set()
 if os.path.exists(FILE_MASTER):
@@ -61,15 +130,36 @@ if os.path.exists(FILE_MASTER):
         df_map = pd.read_excel(FILE_MASTER, sheet_name='Sheet2', header=1)
         col_name = next((c for c in df_map.columns if 'NAMA' in str(c).upper()), None)
         col_jenis = next((c for c in df_map.columns if 'ALAT' in str(c).upper() and 'BERAT' in str(c).upper() and c != col_name), None)
+        col_tipe = next((c for c in df_map.columns if 'TYPE' in str(c).upper() or 'MERK' in str(c).upper()), None)
+        col_cap = next((c for c in df_map.columns if any(k in str(c).upper() for k in ['CAP', 'KAPASITAS'])), None)
+        col_hp = next((c for c in df_map.columns if any(k in str(c).upper() for k in ['HP', 'HORSE POWER'])), None)
+        
         df_map.dropna(subset=[col_name], inplace=True)
         
         for _, row in df_map.iterrows():
             u_name = str(row[col_name]).strip().upper()
             c_id = clean_unit_name(u_name)
             if c_id:
+                cap_val = 0.0
+                try:
+                    if pd.notna(row[col_cap]):
+                        match_cap = re.search(r"(\d+(\.\d+)?)", str(row[col_cap]))
+                        if match_cap: cap_val = float(match_cap.group(1))
+                except: pass
+                
+                hp_val = 0.0
+                try:
+                    if col_hp and pd.notna(row[col_hp]):
+                        match_hp = re.search(r"(\d+(\.\d+)?)", str(row[col_hp]))
+                        if match_hp: hp_val = float(match_hp.group(1))
+                except: pass
+                
                 master_data_map[c_id] = {
                     'Unit_Name': u_name,
-                    'Jenis_Alat': str(row[col_jenis]).strip().upper() if pd.notna(row[col_jenis]) else "OTHERS"
+                    'Jenis_Alat': str(row[col_jenis]).strip().upper() if pd.notna(row[col_jenis]) else "OTHERS",
+                    'Merk': str(row[col_tipe]).strip().upper() if pd.notna(row[col_tipe]) else "-",
+                    'Capacity': cap_val,
+                    'HP': hp_val
                 }
                 master_keys_set.add(c_id)
     except Exception as e: print(f"   [ERROR] Load Master: {e}")
@@ -159,29 +249,34 @@ if os.path.exists(FILE_BBM):
                 
                 vals = pd.to_numeric(valid_data_rows.iloc[:, col], errors='coerce')
                 
-                temp = pd.DataFrame({'Date': dates_series, 'Value': vals.values})
-                temp.dropna(subset=['Date'], inplace=True)
+                temp = pd.DataFrame({
+                    'Date': dates_series,
+                    'Value': vals.values
+                }).dropna(subset=['Date'])
                 
                 if final_clean_key not in hm_data_store: hm_data_store[final_clean_key] = []
                 hm_data_store[final_clean_key].append(temp)
 
 # ==============================================================================
-# 3. FUNGSI LOGIC BANTUAN (CONTINUOUS ROLLING DIFF)
+# 3. FUNGSI AGREGASI HM BULANAN
 # ==============================================================================
 def resolve_unit_type(clean_ops, master_map):
     utype = "OTHERS"
     if clean_ops in master_map: 
-        utype = normalize_type(master_map[clean_ops]['Jenis_Alat'])
-        
+        t = str(master_map[clean_ops]['Jenis_Alat']).upper()
+        if "TRONTON" in t: utype = "TRONTON"
+        elif "TRAILER" in t or "HEAD" in t: utype = "TRAILER"
+        elif "REACH" in t or "STACKER" in t or "SMV" in t: utype = "REACH STACKER"
+        elif "FORKLIFT" in t: utype = "FORKLIFT"
+        elif "CRANE" in t: utype = "CRANE"
+        elif "SIDE" in t: utype = "SIDE LOADER"
+        elif "TOP" in t: utype = "TOP LOADER"
     if utype != "OTHERS": return utype
     if "TRONTON" in clean_ops: return "TRONTON"
     if "TRAILER" in clean_ops or re.search(r'L\s*\d+', clean_ops): return "TRAILER"
     return "OTHERS"
 
 def calculate_monthly_hm_for_unit(df_list):
-    """
-    Metode Continuous Rolling Diff: Menghitung selisih harian riil berkesinambungan
-    """
     if not df_list: return pd.DataFrame()
     
     df = pd.concat(df_list, ignore_index=True).sort_values('Date')
@@ -262,7 +357,7 @@ if os.path.exists(FILE_NON_TRUCKING):
     df_nt = pd.DataFrame(nt_list)
 
 # ==============================================================================
-# 5. FORECASTING ENGINE (CONSTRAINED CAUSAL MODEL & CV ERROR)
+# 5. FORECASTING ENGINE (MURNI ML & PABRIK SEBAGAI PEMBANDING SAJA)
 # ==============================================================================
 print("4. Menjalankan Forecasting Engine...")
 df_final = pd.concat([df_truck, df_nt], ignore_index=True)
@@ -284,8 +379,10 @@ for cfg in configs:
     if sub.empty: continue
     
     agg = sub.groupby('Month_Num').agg({'LITER': 'sum', 'Unit_Clean': 'nunique', **{p: 'sum' for p in cfg['preds']}}).reset_index()
+    
     valid_model = False
     rm = LinearRegression()
+    r2_model = None
     
     if len(agg) >= 2:
         for col in cfg['preds'] + ['LITER']:
@@ -318,36 +415,56 @@ for cfg in configs:
             else:
                 unit_pred_act[p] = 0
                 
+        pred_wl_ton = unit_pred_act.get('Workload', unit_pred_act.get('Ton', 0))
+        pred_hm_final = unit_pred_act.get('HM', 0)
+        
+        # 2. Ambil Standar Pabrik dari AI Knowledge Base (Hanya sebagai Pembanding)
+        c_unit = clean_unit_name(unit)
+        meta_unit = master_data_map.get(c_unit, {})
+        merk_unit = meta_unit.get('Merk', '-')
+        cap_unit = meta_unit.get('Capacity', 0.0)
+        hp_unit = meta_unit.get('HP', 0.0)
+        
+        std_pabrik_min, std_pabrik_max = get_standar_pabrik_liter(cfg['type'], merk_unit, cap_unit, hp_unit, pred_hm_final)
+        
+        # 3. Prediksi Normal ML
         expected_liter_normal = 0
+        use_ml = False
+        
         if valid_model:
             X_pred = [unit_pred_act.get(p, 0) for p in cfg['preds']]
-            expected_liter_normal = max(0, rm.predict([X_pred])[0])
+            ml_pred = rm.predict([X_pred])[0]
             
-        # 2. Mengukur Efisiensi (Dengan Perlindungan Zero Denominator)
+            if ml_pred > 0:
+                expected_liter_normal = ml_pred
+                use_ml = True
+                
+        # 4. Mengukur Efisiensi (Correction Factor) MURNI DARI ML
         ratios_eff = []
         actual_lits = []
         
         for _, row in unit_history.iterrows():
-            X_hist = [row[p] for p in cfg['preds']]
             actual_lit = row['LITER']
+            if pd.isna(actual_lit): actual_lit = 0
             
-            if valid_model and sum(X_hist) > 0:
-                # SAFEGUARD: Batas minimal normal_hist di-set ke 10 Liter (Cegah pembagian nol)
-                normal_hist = max(10, rm.predict([X_hist])[0])
-                ratios_eff.append(actual_lit / normal_hist)
+            if actual_lit > 0:
                 actual_lits.append(actual_lit)
-                
+                if use_ml:
+                    X_hist = [row[p] for p in cfg['preds']]
+                    normal_hist = rm.predict([X_hist])[0]
+                    if normal_hist > 0:
+                        ratios_eff.append(actual_lit / normal_hist)
+                            
         eff_factor = 1.0
         final_forecast = 0
-        note = "Data Kurang"
+        note = "Data Kurang / ML Gagal"
         error_margin_val = None
         
-        if valid_model and expected_liter_normal > 0:
+        if use_ml and expected_liter_normal > 0:
             if ratios_eff:
                 eff_factor = np.mean(ratios_eff)
-                eff_factor = max(0.80, min(1.20, eff_factor)) # Maksimal deviasi faktor 20%
+                eff_factor = max(0.80, min(1.20, eff_factor)) # Dibatasi Max Boros 20%, Max Irit 20%
                 
-                # PERBAIKAN: Menggunakan Coefficient of Variation (CV) untuk error kestabilan
                 if len(actual_lits) > 1 and np.mean(actual_lits) > 0:
                     cv = np.std(actual_lits) / np.mean(actual_lits)
                     error_margin_val = round(cv * 100, 2)
@@ -356,26 +473,32 @@ for cfg in configs:
                     
             final_forecast = expected_liter_normal * eff_factor
             
+            # PENULISAN NOTES SPESIFIK JIKA ML BERHASIL
             if ratios_eff:
-                trend_str = "Standard"
-                if eff_factor > 1.05: trend_str = f"Boros"
-                elif eff_factor < 0.95: trend_str = f"Irit"
-                note = f"General -> {trend_str}"
+                trend_str = "Boros" if eff_factor > 1.05 else ("Irit" if eff_factor < 0.95 else "Standard")
+                note = f"ML Regression -> {trend_str}"
             else:
-                note = "Tidak ada history valid (Nol Ops), pakai general"
+                note = "ML Regression -> Tidak Ada History BBM Valid"
+        else:
+            # JIKA ML GAGAL / ANOMALI / AKTIVITAS 0
+            if pred_hm_final == 0:
+                note = "Tidak Ada Prediksi Aktivitas (HM=0)"
+            else:
+                note = "Data Historis Tidak Cukup / ML Gagal (Anomali)"
                 
-        r2_val = round(r2_model, 2) if valid_model else None
-        pred_wl_ton = unit_pred_act.get('Workload', unit_pred_act.get('Ton', 0))
+        r2_val = round(r2_model, 2) if use_ml else None
         
         forecast_detail_list.append({
             'Category': cfg['cat'], 
             'Type': cfg['type'], 
             'Unit_Name': unit,
-            'Forecast_HM_Dec': round(unit_pred_act.get('HM', 0), 2), 
+            'Forecast_HM_Dec': round(pred_hm_final, 2), 
             'Forecast_Workload_Ton_Dec': round(pred_wl_ton, 2), 
-            'Expected_LITER_Normal': round(expected_liter_normal, 2), 
+            'Expected_BBM_Normal': round(expected_liter_normal, 2), 
+            'Standar_BBM_Pabrik_Min': round(std_pabrik_min, 2),
+            'Standar_BBM_Pabrik_Max': round(std_pabrik_max, 2),
             'Correction_Factor': round(eff_factor, 2),
-            'Forecast_LITER_Dec': round(final_forecast, 2), 
+            'Forecast_BBM_Dec': round(final_forecast, 2), 
             'Akurasi_General_R2': r2_val,
             'Error_Fluktuasi_Unit_Pct': error_margin_val,
             'Note': note
@@ -385,10 +508,19 @@ for cfg in configs:
 # 6. EXPORT HASIL
 # ==============================================================================
 df_res_detail = pd.DataFrame(forecast_detail_list)
+
+cols_order = [
+    'Category', 'Type', 'Unit_Name', 'Forecast_HM_Dec', 'Forecast_Workload_Ton_Dec',
+    'Expected_BBM_Normal', 'Standar_BBM_Pabrik_Min', 'Standar_BBM_Pabrik_Max', 
+    'Correction_Factor', 'Forecast_BBM_Dec', 'Akurasi_General_R2', 
+    'Error_Fluktuasi_Unit_Pct', 'Note'
+]
+df_res_detail = df_res_detail[[c for c in cols_order if c in df_res_detail.columns]]
+
 with pd.ExcelWriter(OUTPUT_EXCEL) as writer:
     df_res_detail.to_excel(writer, sheet_name='Forecast_Per_Unit', index=False)
     df_final.to_excel(writer, sheet_name='Data_Source_Detail', index=False)
 
-print("\n=== CONTOH HASIL FORECAST PER UNIT (CONSTRAINED MODEL) ===")
-print(df_res_detail[['Unit_Name', 'Forecast_HM_Dec', 'Forecast_Workload_Ton_Dec', 'Expected_LITER_Normal', 'Forecast_LITER_Dec']].head(5))
+print("\n=== CONTOH HASIL FORECAST PER UNIT (MURNI ML) ===")
+print(df_res_detail[['Unit_Name', 'Expected_BBM_Normal', 'Standar_BBM_Pabrik_Max', 'Forecast_BBM_Dec', 'Note']].head(5))
 print(f"\nFile Detail tersimpan: {OUTPUT_EXCEL}")

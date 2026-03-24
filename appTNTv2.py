@@ -1087,7 +1087,6 @@ if category_filter == "Proses Data Awal":
 # ------------------------------------------------------------------------------
 elif category_filter == "Proses Forecast":
     st.header("Forecast Penggunaan BBM")
-    #st.markdown("Silakan upload 4 file di bawah ini untuk memprediksi konsumsi BBM tiap unit satu bulan kedepan.")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -1111,18 +1110,103 @@ elif category_filter == "Proses Forecast":
                             if len(last_part) < 6: return last_part
                         return s.replace("-", "").strip()
 
+                    def get_standar_pabrik_liter(jenis, merk, cap, hp, hm_pred):
+                        jenis = str(jenis).upper()
+                        merk = str(merk).upper()
+                        try: cap = float(cap)
+                        except: cap = 0.0
+                        try: hp = float(hp)
+                        except: hp = 0.0
+                        
+                        base_l_per_hm = 0.0
+                        
+                        if hp > 0:
+                            if 'REACH STACKER' in jenis: load_factor = 0.055
+                            elif 'FORKLIFT' in jenis: load_factor = 0.045
+                            elif 'LOADER' in jenis: load_factor = 0.050
+                            elif 'CRANE' in jenis: load_factor = 0.040
+                            elif 'TRAILER' in jenis or 'HEAD' in jenis: load_factor = 0.020 
+                            elif 'TRONTON' in jenis: load_factor = 0.018
+                            else: load_factor = 0.04
+                            
+                            if 'KALMAR' in merk or 'VOLVO' in merk or 'SCANIA' in merk: load_factor *= 0.95 
+                            elif 'SANY' in merk or 'WEICHAI' in merk: load_factor *= 1.05 
+                            elif 'HINO' in merk or 'ISUZU' in merk: load_factor *= 0.98 
+                            
+                            base_l_per_hm = hp * load_factor
+                            
+                        else:
+                            if 'REACH STACKER' in jenis:
+                                if 'KALMAR' in merk: base_l_per_hm = 16.5
+                                elif 'SANY' in merk: base_l_per_hm = 15.0
+                                elif 'KONE' in merk: base_l_per_hm = 17.0
+                                elif 'LINDE' in merk: base_l_per_hm = 16.0
+                                else: base_l_per_hm = 16.0
+                            elif 'FORKLIFT' in jenis:
+                                if cap >= 25: base_l_per_hm = 9.0
+                                elif cap >= 10: base_l_per_hm = 6.5
+                                elif cap >= 5: base_l_per_hm = 4.0
+                                else: base_l_per_hm = 2.5
+                            elif 'LOADER' in jenis: 
+                                if 'KALMAR' in merk: base_l_per_hm = 14.5
+                                elif 'SANY' in merk: base_l_per_hm = 13.5
+                                else: base_l_per_hm = 14.0
+                            elif 'CRANE' in jenis:
+                                if cap >= 70: base_l_per_hm = 14.0
+                                elif cap >= 40: base_l_per_hm = 10.0
+                                else: base_l_per_hm = 8.0
+                            elif 'TRAILER' in jenis or 'HEAD' in jenis:
+                                if 'HINO' in merk: base_l_per_hm = 5.5
+                                elif 'ISUZU' in merk: base_l_per_hm = 5.0
+                                elif 'UD' in merk or 'NISSAN' in merk: base_l_per_hm = 5.8
+                                elif 'MERCEDES' in merk or 'BENZ' in merk: base_l_per_hm = 6.0
+                                else: base_l_per_hm = 5.5
+                            elif 'TRONTON' in jenis:
+                                base_l_per_hm = 4.5
+                            else:
+                                base_l_per_hm = 5.0 
+                                
+                        min_l_per_hm = base_l_per_hm * 0.85
+                        max_l_per_hm = base_l_per_hm * 1.15
+                        
+                        return hm_pred * min_l_per_hm, hm_pred * max_l_per_hm
+
                     master_data_map = {}
                     master_keys_set = set()
                     df_map = pd.read_excel(file_master, sheet_name='Sheet2', header=1)
                     col_name = next((c for c in df_map.columns if 'NAMA' in str(c).upper()), None)
                     col_jenis = next((c for c in df_map.columns if 'ALAT' in str(c).upper() and 'BERAT' in str(c).upper() and c != col_name), None)
+                    col_tipe = next((c for c in df_map.columns if 'TYPE' in str(c).upper() or 'MERK' in str(c).upper()), None)
+                    col_cap = next((c for c in df_map.columns if any(k in str(c).upper() for k in ['CAP', 'KAPASITAS'])), None)
+                    col_hp = next((c for c in df_map.columns if any(k in str(c).upper() for k in ['HP', 'HORSE POWER'])), None)
+                    
                     df_map.dropna(subset=[col_name], inplace=True)
                     
                     for _, row in df_map.iterrows():
                         u_name = str(row[col_name]).strip().upper()
                         c_id = clean_unit_name(u_name)
                         if c_id:
-                            master_data_map[c_id] = {'Unit_Name': u_name, 'Jenis_Alat': str(row[col_jenis]).strip().upper() if pd.notna(row[col_jenis]) else "OTHERS"}
+                            cap_val = 0.0
+                            try:
+                                if pd.notna(row[col_cap]):
+                                    match_cap = re.search(r"(\d+(\.\d+)?)", str(row[col_cap]))
+                                    if match_cap: cap_val = float(match_cap.group(1))
+                            except: pass
+                            
+                            hp_val = 0.0
+                            try:
+                                if col_hp and pd.notna(row[col_hp]):
+                                    match_hp = re.search(r"(\d+(\.\d+)?)", str(row[col_hp]))
+                                    if match_hp: hp_val = float(match_hp.group(1))
+                            except: pass
+                            
+                            master_data_map[c_id] = {
+                                'Unit_Name': u_name,
+                                'Jenis_Alat': str(row[col_jenis]).strip().upper() if pd.notna(row[col_jenis]) else "OTHERS",
+                                'Merk': str(row[col_tipe]).strip().upper() if pd.notna(row[col_tipe]) else "-",
+                                'Capacity': cap_val,
+                                'HP': hp_val
+                            }
                             master_keys_set.add(c_id)
 
                     def get_master_match(raw_name):
@@ -1266,8 +1350,11 @@ elif category_filter == "Proses Forecast":
                         sub = df_final[(df_final['Category']==cfg['cat']) & (df_final['Type']==cfg['type']) & (df_final['Month_Num'].isin(cfg['range']))]
                         if sub.empty: continue
                         agg = sub.groupby('Month_Num').agg({'LITER': 'sum', 'Unit_Clean': 'nunique', **{p: 'sum' for p in cfg['preds']}}).reset_index()
+                        
                         valid_model = False
                         rm = LinearRegression()
+                        r2_model = None
+                        
                         if len(agg) >= 2:
                             for col in cfg['preds'] + ['LITER']: agg[f'{col}_Per_Unit'] = agg[col] / agg['Unit_Clean']
                             X_train = agg[[f'{p}_Per_Unit' for p in cfg['preds']]]
@@ -1277,7 +1364,9 @@ elif category_filter == "Proses Forecast":
                                 r2_model = r2_score(y_train, rm.predict(X_train))
                                 valid_model = True
 
-                        for unit in sub['Unit_Clean'].unique():
+                        unique_units = sub['Unit_Clean'].unique()
+                        
+                        for unit in unique_units:
                             unit_history = sub[sub['Unit_Clean'] == unit]
                             unit_pred_act = {}
                             
@@ -1293,44 +1382,94 @@ elif category_filter == "Proses Forecast":
                                 else:
                                     unit_pred_act[p] = 0
                                     
+                            pred_wl_ton = unit_pred_act.get('Workload', unit_pred_act.get('Ton', 0))
+                            pred_hm_final = unit_pred_act.get('HM', 0)
+                            
+                            c_unit = clean_unit_name(unit)
+                            meta_unit = master_data_map.get(c_unit, {})
+                            merk_unit = meta_unit.get('Merk', '-')
+                            cap_unit = meta_unit.get('Capacity', 0.0)
+                            hp_unit = meta_unit.get('HP', 0.0)
+                            
+                            std_pabrik_min, std_pabrik_max = get_standar_pabrik_liter(cfg['type'], merk_unit, cap_unit, hp_unit, pred_hm_final)
+                            
                             expected_liter_normal = 0
+                            use_ml = False
+                            
                             if valid_model: 
                                 X_pred = [unit_pred_act.get(p, 0) for p in cfg['preds']]
-                                expected_liter_normal = max(0, rm.predict([X_pred])[0])
-                                
+                                ml_pred = rm.predict([X_pred])[0]
+                                if ml_pred > 0:
+                                    expected_liter_normal = ml_pred
+                                    use_ml = True
+                                    
                             ratios_eff, actual_lits = [], []
                             for _, row in unit_history.iterrows():
-                                X_hist = [row[p] for p in cfg['preds']]
                                 actual_lit = row['LITER']
-                                if valid_model and sum(X_hist) > 0:
-                                    normal_hist = max(10, rm.predict([X_hist])[0])
-                                    ratios_eff.append(actual_lit / normal_hist)
+                                if pd.isna(actual_lit): actual_lit = 0
+                                
+                                if actual_lit > 0:
                                     actual_lits.append(actual_lit)
-                                    
-                            eff_factor, final_forecast, error_margin_val = 1.0, 0, None
-                            if valid_model and expected_liter_normal > 0:
+                                    if use_ml:
+                                        X_hist = [row[p] for p in cfg['preds']]
+                                        normal_hist = rm.predict([X_hist])[0]
+                                        if normal_hist > 0:
+                                            ratios_eff.append(actual_lit / normal_hist)
+                                            
+                            eff_factor = 1.0
+                            final_forecast = 0
+                            note = "Data Kurang / ML Gagal"
+                            error_margin_val = None
+                            
+                            if use_ml and expected_liter_normal > 0:
                                 if ratios_eff:
-                                    eff_factor = max(0.80, min(1.20, np.mean(ratios_eff)))
+                                    eff_factor = np.mean(ratios_eff)
+                                    eff_factor = max(0.80, min(1.20, eff_factor))
                                     if len(actual_lits) > 1 and np.mean(actual_lits) > 0:
                                         cv = np.std(actual_lits) / np.mean(actual_lits)
                                         error_margin_val = round(cv * 100, 2)
                                     else:
                                         error_margin_val = 0.0
                                 final_forecast = expected_liter_normal * eff_factor
+                                
+                                if ratios_eff:
+                                    trend_str = "Boros" if eff_factor > 1.05 else ("Irit" if eff_factor < 0.95 else "Standard")
+                                    note = f"ML Regression -> {trend_str}"
+                                else:
+                                    note = "ML Regression -> Tidak Ada History BBM Valid"
+                            else:
+                                if pred_hm_final == 0:
+                                    note = "Tidak Ada Prediksi Aktivitas (HM=0)"
+                                else:
+                                    note = "Data Historis Tidak Cukup / ML Gagal (Anomali)"
                                     
-                            pred_wl_ton = unit_pred_act.get('Workload', unit_pred_act.get('Ton', 0))
+                            r2_val = round(r2_model, 2) if use_ml else None
+                            
                             forecast_detail_list.append({
-                                'Kategori': cfg['cat'], 'Jenis': cfg['type'], 'Nama Unit': unit,
-                                'Prediksi HM (Des)': round(unit_pred_act.get('HM', 0), 2), 
-                                'Prediksi Muatan (Ton/TonKm)': round(pred_wl_ton, 2), 
-                                'Estimasi BBM Normal (L)': round(expected_liter_normal, 2), 
-                                'Faktor Kebiasaan Truk': round(eff_factor, 2),
-                                'Prediksi Final LITER (Des)': round(final_forecast, 2), 
-                                'Akurasi Regresi (R2)': round(r2_model, 2) if valid_model else None,
-                                'Fluktuasi Error (%)': error_margin_val
+                                'Category': cfg['cat'], 
+                                'Type': cfg['type'], 
+                                'Unit_Name': unit,
+                                'Forecast_HM_Dec': round(pred_hm_final, 2), 
+                                'Forecast_Workload_Ton_Dec': round(pred_wl_ton, 2), 
+                                'Expected_BBM_Normal': round(expected_liter_normal, 2), 
+                                'Standar_BBM_Pabrik_Min': round(std_pabrik_min, 2),
+                                'Standar_BBM_Pabrik_Max': round(std_pabrik_max, 2),
+                                'Correction_Factor': round(eff_factor, 2),
+                                'Forecast_BBM_Dec': round(final_forecast, 2), 
+                                'Akurasi_General_R2': r2_val,
+                                'Error_Fluktuasi_Unit_Pct': error_margin_val,
+                                'Note': note
                             })
                     
                     df_res = pd.DataFrame(forecast_detail_list)
+                    
+                    cols_order = [
+                        'Category', 'Type', 'Unit_Name', 'Forecast_HM_Dec', 'Forecast_Workload_Ton_Dec',
+                        'Expected_BBM_Normal', 'Standar_BBM_Pabrik_Min', 'Standar_BBM_Pabrik_Max', 
+                        'Correction_Factor', 'Forecast_BBM_Dec', 'Akurasi_General_R2', 
+                        'Error_Fluktuasi_Unit_Pct', 'Note'
+                    ]
+                    df_res = df_res[[c for c in cols_order if c in df_res.columns]]
                     
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1354,6 +1493,56 @@ elif category_filter == "Proses Forecast":
         df_res = st.session_state.fcst_df_res
         df_final = st.session_state.fcst_df_final
 
+        # ===================================================================================
+        # AUDIT KELENGKAPAN DATA (DATA COMPLETENESS)
+        # ===================================================================================
+        st.markdown("### 📊 Kelengkapan Data untuk Forecast")
+        
+        # Logika pemisahan unit berhasil vs gagal (0 BBM di bulan depan)
+        df_gagal = df_res[df_res['Forecast_BBM_Dec'] == 0].copy()
+        df_berhasil = df_res[df_res['Forecast_BBM_Dec'] > 0].copy()
+        
+        total_unit = len(df_res)
+        total_gagal = len(df_gagal)
+        total_berhasil = len(df_berhasil)
+        pct_gagal = (total_gagal / total_unit * 100) if total_unit > 0 else 0
+        
+        gagal_trucking = len(df_gagal[df_gagal['Category'] == 'TRUCKING'])
+        gagal_nontrucking = len(df_gagal[df_gagal['Category'] == 'NON-TRUCKING'])
+        
+        # 1. Metric Cards
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Total Populasi Unit", f"{total_unit} Unit")
+        col_m2.metric("Persentase Unit Tidak Masuk Analisis", f"{pct_gagal:.1f}%")
+        col_m3.metric("Rincian Unit yang Tidak Masuk Analisis", f"Truck: {gagal_trucking} | Non-Truck: {gagal_nontrucking}")
+        
+        # 2. Layout untuk Donut Chart & Expander
+        col_chart, col_exp = st.columns([1, 2])
+        
+        with col_chart:
+            # Donut Chart (Kesehatan Data)
+            pie_data = pd.DataFrame({
+                'Status': ['Berhasil di-Forecast', 'Data Kosong/Anomali'],
+                'Jumlah': [total_berhasil, total_gagal]
+            })
+            fig_pie = px.pie(pie_data, names='Status', values='Jumlah', hole=0.5,
+                             color='Status', color_discrete_map={'Berhasil di-Forecast': '#2ca02c', 'Data Kosong/Anomali': '#d62728'})
+            fig_pie.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
+            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig_pie, use_container_width=True)
+            
+        with col_exp:
+            st.markdown("<br>", unsafe_allow_html=True) # Spacer agar sejajar
+            with st.expander("📋 Daftar unit yang tidak masuk analisis (Data Kosong/Anomali)", expanded=True):
+                if not df_gagal.empty:
+                    # Menampilkan tabel detail untuk evaluasi manajemen
+                    st.dataframe(df_gagal[['Category', 'Type', 'Unit_Name', 'Note']].reset_index(drop=True), use_container_width=True)
+                else:
+                    st.success("Luar biasa! 100% data unit berhasil dianalisa tanpa ada yang kosong.")
+
+        st.markdown("---")
+        # ===================================================================================
+
         # -----------------------------------------------------------------------------------
         # GRAFIK TREN HISTORIS VS FORECAST PER UNIT
         # -----------------------------------------------------------------------------------
@@ -1364,8 +1553,8 @@ elif category_filter == "Proses Forecast":
             df_hist.rename(columns={'Unit_Clean': 'Nama Unit'}, inplace=True)
             
             # 2. Siapkan data forecast
-            df_fcst = df_res[['Nama Unit', 'Prediksi Final LITER (Des)']].copy()
-            df_fcst.rename(columns={'Prediksi Final LITER (Des)': 'LITER'}, inplace=True)
+            df_fcst = df_res[['Unit_Name', 'Forecast_BBM_Dec']].copy()
+            df_fcst.rename(columns={'Unit_Name': 'Nama Unit', 'Forecast_BBM_Dec': 'LITER'}, inplace=True)
             df_fcst['Month_Num'] = 12
             
             unit_list = sorted(df_hist['Nama Unit'].unique().tolist())
@@ -1421,7 +1610,7 @@ else:
     df_monthly = pd.DataFrame()
     df_missing = pd.DataFrame()
 
-    if category_filter == "Trucking":
+    if category_filter == "Analisa Trucking":
         with st.spinner("Memproses Data Trucking..."):
             df_active_raw, df_monthly, df_missing = process_trucking()
             mode_label = "Trucking"
