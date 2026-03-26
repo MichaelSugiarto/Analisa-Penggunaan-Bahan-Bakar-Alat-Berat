@@ -1496,7 +1496,7 @@ elif category_filter == "Proses Forecast":
         # ===================================================================================
         # AUDIT KELENGKAPAN DATA (DATA COMPLETENESS)
         # ===================================================================================
-        st.markdown("### 📊 Kelengkapan Data untuk Forecast")
+        st.markdown("### 📊 Populasi Data untuk Forecast")
         
         # Logika pemisahan unit berhasil vs gagal (0 BBM di bulan depan)
         df_gagal = df_res[df_res['Forecast_BBM_Dec'] == 0].copy()
