@@ -1,0 +1,4 @@
+- atribut lokasi cabang untuk non trucking tidak digunakan, jadi datanya nanti langsung dalam bentuk jumlah semua container saja (data cabang tidak digunakan untuk skripsi)
+- dashboard yang menampilkan efisiensi bahan bakar tiap unit alat berat tidak digunakan di skripsi, jadi nama unit dan lokasi unit berada di cabang mana tidak diberikan keluar
+- forecast yang dilakukan di skripsi hanya sebatas untuk per jenis alat berat (crane, forklift, dll) - tidak dibuat per unit
+- nama unit diberi code sendiri. contohnya: crane1, crane2, dst
