@@ -85,15 +85,15 @@ def run_forecast_pipeline():
     train_agg, test_agg, exog_data = prepare_data()
     list_unit = train_agg['EQUIP NAME'].unique()
     
-    results_sarima = []
-    results_sarimax = []
-    error_sarima_list = []
-    error_sarimax_list = []
+    results_arima = []
+    results_arimax = []
+    error_arima_list = []
+    error_arimax_list = []
     
     # List baru untuk menampung data yang tidak masuk kriteria
     excluded_units_list = []
     
-    print("\n[AI ENGINE] Memulai pelatihan: Smart Filter, Auto-ARIMA, Rolling Window, & Cumulative Regression...")
+    print("\n[AI ENGINE] Memulai pelatihan: Smart Filter, Auto-ARIMA vs Auto-ARIMAX, Rolling Window, & Cumulative Regression...")
     
     for unit in list_unit:
         try:
@@ -153,15 +153,17 @@ def run_forecast_pipeline():
             test_periods = df_unit_test.index
             
             # ---------------------------------------------------------
-            # 3. TAHAP 1: PREDIKSI HM DENGAN AUTO-ARIMA & SEASONAL FALLBACK
+            # 3. TAHAP 1: PREDIKSI HM DENGAN AUTO-ARIMA & AUTO-ARIMAX
             # ---------------------------------------------------------
-            model_sarima = pm.auto_arima(df_unit_train['HM_Capped'], X=None, seasonal=False, stepwise=True, suppress_warnings=True, error_action="ignore")
-            raw_pred_sarima = np.maximum(0, model_sarima.predict(n_periods=steps_ahead))
-            pred_hm_sarima = apply_seasonal_fallback(raw_pred_sarima.values, df_unit_train['HM_Capped'], test_periods)
+            # ARIMA (Tanpa Eksogen)
+            model_arima = pm.auto_arima(df_unit_train['HM_Capped'], X=None, seasonal=False, stepwise=True, suppress_warnings=True, error_action="ignore")
+            raw_pred_arima = np.maximum(0, model_arima.predict(n_periods=steps_ahead))
+            pred_hm_arima = apply_seasonal_fallback(raw_pred_arima.values, df_unit_train['HM_Capped'], test_periods)
             
-            model_sarimax = pm.auto_arima(df_unit_train['HM_Capped'], X=exog_train, seasonal=False, stepwise=True, suppress_warnings=True, error_action="ignore")
-            raw_pred_sarimax = np.maximum(0, model_sarimax.predict(n_periods=steps_ahead, X=exog_test))
-            pred_hm_sarimax = apply_seasonal_fallback(raw_pred_sarimax.values, df_unit_train['HM_Capped'], test_periods)
+            # ARIMAX (Dengan Eksogen)
+            model_arimax = pm.auto_arima(df_unit_train['HM_Capped'], X=exog_train, seasonal=False, stepwise=True, suppress_warnings=True, error_action="ignore")
+            raw_pred_arimax = np.maximum(0, model_arimax.predict(n_periods=steps_ahead, X=exog_test))
+            pred_hm_arimax = apply_seasonal_fallback(raw_pred_arimax.values, df_unit_train['HM_Capped'], test_periods)
             
             # ---------------------------------------------------------
             # 4. TAHAP 2: CUMULATIVE REGRESSION LITER (ANTI LUMPY DEMAND)
@@ -175,70 +177,70 @@ def run_forecast_pipeline():
                 lr.fit(cum_hm, cum_liter)
                 true_ratio = lr.coef_[0]
             
-            pred_liter_sarima = pred_hm_sarima * true_ratio
-            pred_liter_sarimax = pred_hm_sarimax * true_ratio
+            pred_liter_arima = pred_hm_arima * true_ratio
+            pred_liter_arimax = pred_hm_arimax * true_ratio
             
             aktual_liter = df_unit_test['LITER'].values
             aktual_hm = df_unit_test['HM'].values
             
-            rmse_sarima = np.sqrt(mean_squared_error(aktual_liter, pred_liter_sarima))
-            rmse_sarimax = np.sqrt(mean_squared_error(aktual_liter, pred_liter_sarimax))
-            error_sarima_list.append(rmse_sarima)
-            error_sarimax_list.append(rmse_sarimax)
+            rmse_arima = np.sqrt(mean_squared_error(aktual_liter, pred_liter_arima))
+            rmse_arimax = np.sqrt(mean_squared_error(aktual_liter, pred_liter_arimax))
+            error_arima_list.append(rmse_arima)
+            error_arimax_list.append(rmse_arimax)
             
-            # MENYIMPAN HASIL SARIMA
+            # MENYIMPAN HASIL ARIMA
             for i, period in enumerate(df_unit_test.index):
-                sel_hm_sa = pred_hm_sarima[i] - aktual_hm[i]
-                pct_hm_sa = (sel_hm_sa / aktual_hm[i] * 100) if aktual_hm[i] != 0 else 0
-                sel_lit_sa = pred_liter_sarima[i] - aktual_liter[i]
-                pct_lit_sa = (sel_lit_sa / aktual_liter[i] * 100) if aktual_liter[i] != 0 else 0
+                sel_hm_a = pred_hm_arima[i] - aktual_hm[i]
+                pct_hm_a = (sel_hm_a / aktual_hm[i] * 100) if aktual_hm[i] != 0 else 0
+                sel_lit_a = pred_liter_arima[i] - aktual_liter[i]
+                pct_lit_a = (sel_lit_a / aktual_liter[i] * 100) if aktual_liter[i] != 0 else 0
                 
-                results_sarima.append({
+                results_arima.append({
                     'EQUIP NAME': unit, 
                     'Bulan': str(period),
                     'Aktual_HM': round(aktual_hm[i], 2), 
-                    'Prediksi_HM': round(pred_hm_sarima[i], 2),
-                    'Selisih_HM': round(sel_hm_sa, 2), 
-                    'Persentase_Selisih_HM (%)': round(pct_hm_sa, 2),
+                    'Prediksi_HM': round(pred_hm_arima[i], 2),
+                    'Selisih_HM': round(sel_hm_a, 2), 
+                    'Persentase_Selisih_HM (%)': round(pct_hm_a, 2),
                     'Rasio_Sejati (L/HM)': round(true_ratio, 2),
                     'Aktual_LITER': round(aktual_liter[i], 2), 
-                    'Prediksi_LITER': round(pred_liter_sarima[i], 2),
-                    'Selisih_LITER': round(sel_lit_sa, 2), 
-                    'Persentase_Selisih_LITER (%)': round(pct_lit_sa, 2)
+                    'Prediksi_LITER': round(pred_liter_arima[i], 2),
+                    'Selisih_LITER': round(sel_lit_a, 2), 
+                    'Persentase_Selisih_LITER (%)': round(pct_lit_a, 2)
                 })
                 
-                # MENYIMPAN HASIL SARIMAX
-                sel_hm_sx = pred_hm_sarimax[i] - aktual_hm[i]
-                pct_hm_sx = (sel_hm_sx / aktual_hm[i] * 100) if aktual_hm[i] != 0 else 0
-                sel_lit_sx = pred_liter_sarimax[i] - aktual_liter[i]
-                pct_lit_sx = (sel_lit_sx / aktual_liter[i] * 100) if aktual_liter[i] != 0 else 0
+                # MENYIMPAN HASIL ARIMAX
+                sel_hm_ax = pred_hm_arimax[i] - aktual_hm[i]
+                pct_hm_ax = (sel_hm_ax / aktual_hm[i] * 100) if aktual_hm[i] != 0 else 0
+                sel_lit_ax = pred_liter_arimax[i] - aktual_liter[i]
+                pct_lit_ax = (sel_lit_ax / aktual_liter[i] * 100) if aktual_liter[i] != 0 else 0
                 
-                results_sarimax.append({
+                results_arimax.append({
                     'EQUIP NAME': unit, 
                     'Bulan': str(period),
                     'Aktual_HM': round(aktual_hm[i], 2), 
-                    'Prediksi_HM': round(pred_hm_sarimax[i], 2),
-                    'Selisih_HM': round(sel_hm_sx, 2), 
-                    'Persentase_Selisih_HM (%)': round(pct_hm_sx, 2),
+                    'Prediksi_HM': round(pred_hm_arimax[i], 2),
+                    'Selisih_HM': round(sel_hm_ax, 2), 
+                    'Persentase_Selisih_HM (%)': round(pct_hm_ax, 2),
                     'Rasio_Sejati (L/HM)': round(true_ratio, 2),
                     'Aktual_LITER': round(aktual_liter[i], 2), 
-                    'Prediksi_LITER': round(pred_liter_sarimax[i], 2),
-                    'Selisih_LITER': round(sel_lit_sx, 2), 
-                    'Persentase_Selisih_LITER (%)': round(pct_lit_sx, 2)
+                    'Prediksi_LITER': round(pred_liter_arimax[i], 2),
+                    'Selisih_LITER': round(sel_lit_ax, 2), 
+                    'Persentase_Selisih_LITER (%)': round(pct_lit_ax, 2)
                 })
         except Exception as e:
             continue
 
     # KEPUTUSAN MODEL GLOBAL
-    avg_rmse_sarima = np.mean(error_sarima_list) if error_sarima_list else 0
-    avg_rmse_sarimax = np.mean(error_sarimax_list) if error_sarimax_list else 0
+    avg_rmse_arima = np.mean(error_arima_list) if error_arima_list else 0
+    avg_rmse_arimax = np.mean(error_arimax_list) if error_arimax_list else 0
     
-    if avg_rmse_sarimax < avg_rmse_sarima:
-        best_model_name = "SARIMAX (Auto + Cumulative)"
-        final_results = results_sarimax
+    if avg_rmse_arimax < avg_rmse_arima:
+        best_model_name = "ARIMAX (Auto + Cumulative)"
+        final_results = results_arimax
     else:
-        best_model_name = "SARIMA (Auto + Cumulative)"
-        final_results = results_sarima
+        best_model_name = "ARIMA (Auto + Cumulative)"
+        final_results = results_arima
         
     if not final_results:
         print("PERINGATAN: Semua data tersaring (di-exclude). Tidak ada yang diprediksi.")
