@@ -184,7 +184,7 @@ def run_forecast_pipeline():
             df_u_test = test_agg[test_agg['EQUIP NAME'] == unit].set_index('TAHUN_BULAN').copy()
             
             # ---------------------------------------------------------
-            # FILTER LOGIS DATA CACAT (UPDATE FILTER 1 TAHUN = 0)
+            # FILTER LOGIS DATA CACAT (UPDATE DETEKSI TAHUN)
             # ---------------------------------------------------------
             if df_u_test.empty:
                 excluded_units_list.append({'EQUIP NAME': unit, 'NAMA_MASTER_TERPETAKAN': mapped_name, 'Alasan': 'Tidak ada data aktual di tahun uji (2025).'})
@@ -198,22 +198,29 @@ def run_forecast_pipeline():
                 excluded_units_list.append({'EQUIP NAME': unit, 'NAMA_MASTER_TERPETAKAN': mapped_name, 'Alasan': 'Data Uji (Test) kurang dari 12 bulan.'})
                 continue
                 
-            # Filter 1: Cek HM atau LITER = 0 selama 1 tahun (12 bln berturut-turut) di Data Latih (2023-2024)
-            rolling_hm_train = df_u_train['HM'].rolling(window=12).sum()
-            rolling_liter_train = df_u_train['LITER'].rolling(window=12).sum()
-            if (rolling_hm_train == 0).any() or (rolling_liter_train == 0).any():
-                excluded_units_list.append({'EQUIP NAME': unit, 'NAMA_MASTER_TERPETAKAN': mapped_name, 'Alasan': 'HM atau LITER bernilai 0 selama 1 tahun di Data Latih.'})
+            # Filter 1: Cek HM atau LITER = 0 selama 1 tahun penuh di 2023 atau 2024
+            df_2023 = df_u_train[df_u_train.index.year == 2023]
+            df_2024 = df_u_train[df_u_train.index.year == 2024]
+            
+            if len(df_2023) == 12 and (df_2023['HM'].sum() == 0 or df_2023['LITER'].sum() == 0):
+                excluded_units_list.append({
+                    'EQUIP NAME': unit, 
+                    'NAMA_MASTER_TERPETAKAN': mapped_name, 
+                    'Alasan': 'HM atau LITER Aktual bernilai 0 selama 1 tahun penuh di Data Latih (Tahun 2023).'
+                })
+                continue
+                
+            if len(df_2024) == 12 and (df_2024['HM'].sum() == 0 or df_2024['LITER'].sum() == 0):
+                excluded_units_list.append({
+                    'EQUIP NAME': unit, 
+                    'NAMA_MASTER_TERPETAKAN': mapped_name, 
+                    'Alasan': 'HM atau LITER Aktual bernilai 0 selama 1 tahun penuh di Data Latih (Tahun 2024).'
+                })
                 continue
                 
             # Filter 2: Cek HM atau LITER = 0 secara total di Data Uji (Test 2025 -> 1 tahun)
             if df_u_test['HM'].sum() == 0 or df_u_test['LITER'].sum() == 0:
-                excluded_units_list.append({'EQUIP NAME': unit, 'NAMA_MASTER_TERPETAKAN': mapped_name, 'Alasan': 'HM atau LITER Aktual bernilai 0 selama 1 tahun di Data Uji (2025).'})
-                continue
-                
-            # Filter 3 (Opsional Pengaman): Cek Pensiun/Rusak mendadak di 3 bulan akhir 2024
-            last_3_months = df_u_train.tail(3)
-            if len(last_3_months) == 3 and (last_3_months['HM'].sum() == 0 or last_3_months['LITER'].sum() == 0):
-                excluded_units_list.append({'EQUIP NAME': unit, 'NAMA_MASTER_TERPETAKAN': mapped_name, 'Alasan': 'Alat pensiun/rusak mendadak (HM atau LITER 0 selama 3 bulan di akhir 2024).'})
+                excluded_units_list.append({'EQUIP NAME': unit, 'NAMA_MASTER_TERPETAKAN': mapped_name, 'Alasan': 'HM atau LITER Aktual bernilai 0 selama 1 tahun penuh di Data Uji (Tahun 2025).'})
                 continue
             
             # --- Rasio Liter/HM Sederhana ---
