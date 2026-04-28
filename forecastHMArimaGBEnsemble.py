@@ -68,7 +68,7 @@ def prepare_data():
     df_all['HM_Clean'] = df_all.groupby('EQUIP NAME')['HM_Clean'].ffill().fillna(0)
     df_all['Delta_HM'] = df_all.groupby('EQUIP NAME')['HM_Clean'].diff().fillna(0)
     df_all.loc[df_all['Delta_HM'] < 0,   'Delta_HM'] = 0
-    df_all.loc[df_all['Delta_HM'] > 100, 'Delta_HM'] = 0
+    df_all.loc[df_all['Delta_HM'] > 24, 'Delta_HM'] = 0
     df_all['LITER_Clean'] = pd.to_numeric(df_all['LITER'], errors='coerce').fillna(0)
 
     df_all['TAHUN_BULAN'] = df_all['TANGGAL'].dt.to_period('M')
