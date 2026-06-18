@@ -11,31 +11,23 @@ from sklearn.metrics import r2_score
 import io
 import time
 import requests
+import json
+from openai import OpenAI
 
 warnings.filterwarnings('ignore')
 
 # 1. KONFIGURASI FILE & PATH
-FILE_HASIL_TRUCKING     = "HasilTrucking.xlsx"
-FILE_HASIL_NON_TRUCKING = "HasilNonTrucking.xlsx"
-FILE_BBM_RAW            = "BBM AAB.xlsx"
-FILE_HAULAGE_RAW        = "HAULAGE OKT-DES 2025 (Copy).xlsx"
-FILE_DOORING_REVISI     = "DOORING_WITH_DISTANCE_REVISI.xlsx"
 FILE_MASTER_REF         = "cost & bbm 2022 sd 2025 HP & Type.xlsx"
 
-if "etl_step1_processed" not in st.session_state:
-    st.session_state.etl_step1_processed = False
-    st.session_state.out_dooring_file    = None
 
-if "etl_step2_processed" not in st.session_state:
-    st.session_state.etl_step2_processed = False
-    st.session_state.out_truck_file      = None
-    st.session_state.out_nontruck_file   = None
+# ⚙️  KONFIGURASI TIM IT
+# 1) OPENAI_API_KEY
+# Isi API key OpenAI di bawah ini
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "xxxxxx")
 
-if "forecast_processed" not in st.session_state:
-    st.session_state.forecast_processed = False
-    st.session_state.fcst_df_res        = None
-    st.session_state.fcst_df_final      = None
-    st.session_state.fcst_out_file      = None
+# 2) PATH PENYIMPANAN FILE "Konsumsi BBM Standar Pabrik" DI SERVER
+# File hasil crawling akan disimpan & dibaca dari path ini.
+PATH_STANDAR_PABRIK_SERVER = "C:/Users/asus/Downloads/SPIL/bbm/Analisa BBM/Konsumsi_BBM_Standar_Pabrik.xlsx"
 
 if "fcst_hm_processed" not in st.session_state:
     st.session_state.fcst_hm_processed      = False
@@ -49,227 +41,8 @@ if "fcst_hm_processed" not in st.session_state:
 st.set_page_config(page_title="Dashboard Efisiensi BBM", layout="wide")
 st.title("Dashboard BBM Alat Berat")
 
-# 3. FUNGSI UTILITIES
-def clean_unit_name(name):
-    if pd.isna(name): return ""
-    name = str(name).upper().strip()
-    name = name.replace("FORKLIFT", "FORKLIF")
-    return re.sub(r'[^A-Z0-9]', '', name)
-
-def get_smart_match(raw_name, master_dict):
-    raw_clean = clean_unit_name(raw_name)
-    raw_upper = str(raw_name).upper().strip()
-    if raw_clean in master_dict: return raw_clean
-    if "L 8477 UUC" in raw_upper:
-        target = clean_unit_name("L 9902 UR / S75")
-        if target in master_dict: return target
-    if "EX." in raw_upper or "EX " in raw_upper:
-        parts = raw_upper.split("EX.") if "EX." in raw_upper else raw_upper.split("EX ")
-        if len(parts) > 1:
-            candidate = clean_unit_name(parts[-1].replace(")", "").strip())
-            if candidate in master_dict: return candidate
-            for k in master_dict:
-                if candidate in k: return k
-    if "(" in raw_upper:
-        candidate = clean_unit_name(raw_upper.split("(")[0])
-        if candidate in master_dict: return candidate
-        for k in master_dict:
-            if candidate in k: return k
-    return None
-
-# 4. LOGIKA PROSES DATA: NON-TRUCKING
-@st.cache_data(show_spinner=False)
-def process_alat_berat():
-    if not os.path.exists(FILE_HASIL_NON_TRUCKING):
-        st.warning(f"File {FILE_HASIL_NON_TRUCKING} tidak ditemukan.")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    try:
-        df_agg     = pd.read_excel(FILE_HASIL_NON_TRUCKING, sheet_name='Total_Agregat')
-        df_monthly = pd.read_excel(FILE_HASIL_NON_TRUCKING, sheet_name='Data_Bulanan')
-        try:
-            df_missing = pd.read_excel(FILE_HASIL_NON_TRUCKING, sheet_name='Unit_Inaktif')
-            rename_missing = {
-                'Unit_Name': 'Nama Unit', 'Jenis_Alat': 'Jenis', 'Type_Merk': 'Type/Merk',
-                'Horse_Power': 'Horse Power', 'Capacity': 'Capacity (Ton)',
-                'LITER': 'Total Pengisian BBM (L)', 'Total_Ton': 'Total Berat Angkutan (Ton)',
-                'Total Pengisian BBM': 'Total Pengisian BBM (L)'
-            }
-            df_missing.rename(columns=rename_missing, inplace=True)
-        except:
-            df_missing = pd.DataFrame()
-
-        df_agg.columns     = df_agg.columns.str.strip()
-        df_monthly.columns = df_monthly.columns.str.strip()
-        df_agg['Capacity_Num']     = df_agg['Capacity'].fillna(0).astype(float).astype(int)
-        df_monthly['Capacity_Num'] = df_monthly['Capacity'].fillna(0).astype(float).astype(int)
-
-        def get_benchmark_group(jenis, cap):
-            jenis = str(jenis).upper()
-            if 'FORKLIFT' in jenis:
-                if 3 <= cap <= 8 or cap == 0: return 'Forklift (Capacity 3-8)'
-                elif cap >= 10: return 'Forklift (Capacity 10, 28, 32)'
-                return 'Forklift (Lainnya)'
-            elif 'REACH STACKER' in jenis: return 'Reach Stacker'
-            elif 'LOADER' in jenis: return 'Top Loader & Side Loader'
-            elif 'CRANE' in jenis:
-                if cap >= 70: return 'Crane (Capacity 75, 80, 127)'
-                return 'Crane (Lainnya)'
-            elif 'TRONTON' in jenis: return 'Tronton'
-            elif 'TRAILER' in jenis or 'HEAD' in jenis: return 'Trailer/Head'
-            return 'Lainnya'
-
-        df_agg['Benchmark_Group']     = df_agg.apply(lambda r: get_benchmark_group(r.get('Jenis_Alat',''), r.get('Capacity_Num',0)), axis=1)
-        df_monthly['Benchmark_Group'] = df_monthly.apply(lambda r: get_benchmark_group(r.get('Jenis_Alat',''), r.get('Capacity_Num',0)), axis=1)
-
-        for df in [df_agg, df_monthly]:
-            if 'Total_Ton' in df.columns and 'LITER' in df.columns:
-                mask = df['Total_Ton'] > 0
-                df.loc[mask, 'Fuel Ratio (L/Ton)'] = df.loc[mask, 'LITER'] / df.loc[mask, 'Total_Ton']
-                df.loc[~mask, 'Fuel Ratio (L/Ton)'] = 0
-
-        benchmark = df_agg[df_agg['Total_Ton'] > 0].groupby('Benchmark_Group')['Fuel Ratio (L/Ton)'].median().reset_index()
-        benchmark.rename(columns={'Fuel Ratio (L/Ton)': 'Benchmark (L/Ton)'}, inplace=True)
-        df_agg = pd.merge(df_agg, benchmark, on='Benchmark_Group', how='left')
-
-        def get_status(row):
-            if row['Total_Ton'] <= 0: return "Inaktif"
-            return "Efisien" if row['Fuel Ratio (L/Ton)'] <= row['Benchmark (L/Ton)'] else "Boros"
-
-        df_agg['Status'] = df_agg.apply(get_status, axis=1)
-        df_agg['Potensi Pemborosan BBM (L)'] = df_agg.apply(
-            lambda r: (r['Fuel Ratio (L/Ton)'] - r['Benchmark (L/Ton)']) * r['Total_Ton'] if r['Status'] == 'Boros' else 0, axis=1)
-
-        rename_map = {
-            'Unit_Name': 'Nama Unit', 'Jenis_Alat': 'Jenis', 'Type_Merk': 'Type/Merk',
-            'Horse_Power': 'Horse Power', 'Capacity': 'Capacity (Ton)',
-            'LITER': 'Total Pengisian BBM (L)', 'Total_Ton': 'Total Berat Angkutan (Ton)'
-        }
-        df_agg.rename(columns=rename_map, inplace=True)
-        df_monthly.rename(columns=rename_map, inplace=True)
-
-        if not df_missing.empty:
-            if 'Capacity (Ton)' not in df_missing.columns:
-                temp_agg = df_agg[['Nama Unit', 'Capacity (Ton)']].drop_duplicates()
-                if 'Nama Unit' in df_missing.columns:
-                    df_missing = pd.merge(df_missing, temp_agg, on='Nama Unit', how='left')
-                    df_missing['Capacity (Ton)'] = df_missing['Capacity (Ton)'].fillna(0)
-
-        return df_agg, df_monthly, df_missing
-    except Exception as e:
-        st.error(f"Error memproses data Non-Trucking: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-# 5. LOGIKA PROSES DATA: TRUCKING
-@st.cache_data(show_spinner=False)
-def process_trucking():
-    master_dict = {}
-    if os.path.exists(FILE_MASTER_REF):
-        try:
-            df_map    = pd.read_excel(FILE_MASTER_REF, sheet_name='Sheet2', header=1)
-            col_name  = next((c for c in df_map.columns if 'NAMA' in str(c).upper()), None)
-            col_jenis = next((c for c in df_map.columns if 'ALAT' in str(c).upper() and 'BERAT' in str(c).upper() and c != col_name), None)
-            col_type  = next((c for c in df_map.columns if 'TYPE' in str(c).upper() or 'MERK' in str(c).upper()), None)
-            col_loc   = next((c for c in df_map.columns if 'LOKASI' in str(c).upper() or 'DES 2025' in str(c).upper()), df_map.columns[2])
-            col_hp    = next((c for c in df_map.columns if 'HP' in str(c).upper() or 'HORSE' in str(c).upper()), None)
-            if col_name:
-                for _, row in df_map.iterrows():
-                    u_name = str(row[col_name]).strip().upper()
-                    jenis  = str(row[col_jenis]).strip().upper() if col_jenis else ""
-                    if "TRONTON" in jenis or "TRAILER" in jenis or "HEAD" in jenis:
-                        c_id = clean_unit_name(u_name)
-                        master_dict[c_id] = {
-                            'Real_Name': u_name, 'Jenis': jenis,
-                            'Type/Merk': str(row[col_type]).strip() if col_type else "-",
-                            'Lokasi': str(row[col_loc]).strip() if col_loc else "-",
-                            'Horse Power': row[col_hp] if col_hp else "-", 'Capacity': 40
-                        }
-        except Exception as e:
-            st.error(f"Gagal membaca Master File: {e}")
-
-    df_trucking = pd.DataFrame()
-    if os.path.exists(FILE_HASIL_TRUCKING):
-        try:
-            df_raw    = pd.read_excel(FILE_HASIL_TRUCKING, sheet_name='HASIL_ANALISA')
-            valid_rows = []
-            for _, row in df_raw.iterrows():
-                raw_name  = str(row['Nama_Unit']) if 'Nama_Unit' in row else str(row.get('EQUIP NAME', ''))
-                match_key = get_smart_match(raw_name, master_dict)
-                if match_key:
-                    meta = master_dict[match_key]
-                    valid_rows.append({
-                        'Nama Unit': meta['Real_Name'], 'Jenis': meta['Jenis'], 'Type/Merk': meta['Type/Merk'],
-                        'Lokasi': meta['Lokasi'], 'Horse Power': meta['Horse Power'], 'Capacity (Feet)': 40,
-                        'Total Pengisian BBM (L)': row.get('LITER', 0),
-                        'Total Berat Angkutan (Ton)': row.get('Total_Ton', 0),
-                        'Total Kerja (Ton*Km)': row.get('Total_TonKm', 0),
-                        'Fuel Ratio (L/Ton*Km)': row.get('L_per_TonKm', 0)
-                    })
-            df_trucking = pd.DataFrame(valid_rows)
-            if not df_trucking.empty:
-                col_ratio = 'Fuel Ratio (L/Ton*Km)'
-                col_work  = 'Total Kerja (Ton*Km)'
-                median_ratio = df_trucking[df_trucking[col_ratio] > 0][col_ratio].median()
-                df_trucking['Benchmark (L/Ton*Km)'] = median_ratio
-                df_trucking['Status'] = df_trucking.apply(
-                    lambda x: "Efisien" if x[col_ratio] <= x['Benchmark (L/Ton*Km)'] else "Boros", axis=1)
-                df_trucking['Potensi Pemborosan BBM (L)'] = df_trucking.apply(
-                    lambda r: (r[col_ratio] - r['Benchmark (L/Ton*Km)']) * r[col_work] if r['Status'] == 'Boros' else 0, axis=1)
-        except Exception as e:
-            st.error(f"Gagal memproses data trucking utama: {e}")
-
-    df_monthly_trucking = pd.DataFrame()
-    if os.path.exists(FILE_HASIL_TRUCKING):
-        try:
-            df_monthly_raw = pd.read_excel(FILE_HASIL_TRUCKING, sheet_name='Data_Bulanan')
-            monthly_list   = []
-            for _, row in df_monthly_raw.iterrows():
-                raw_name  = str(row['Nama_Unit'])
-                match_key = get_smart_match(raw_name, master_dict)
-                if match_key:
-                    meta = master_dict[match_key]
-                    monthly_list.append({
-                        'Nama Unit': meta['Real_Name'], 'Bulan': str(row['Bulan']).capitalize(),
-                        'Total Pengisian BBM (L)': row.get('LITER', 0),
-                        'Total Kerja (Ton*Km)': row.get('Total_TonKm', 0),
-                        'Jenis': meta['Jenis'], 'Type/Merk': meta['Type/Merk'],
-                        'Lokasi': meta['Lokasi'], 'Horse Power': meta['Horse Power'], 'Capacity (Feet)': 40
-                    })
-            if monthly_list: df_monthly_trucking = pd.DataFrame(monthly_list)
-        except Exception:
-            pass
-
-    df_missing_truck = pd.DataFrame()
-    list_audit = []
-    if os.path.exists(FILE_HASIL_TRUCKING):
-        for sheet in ['OPS_TANPA_BBM', 'BBM_TANPA_OPS', 'GAGAL_MAPPING']:
-            try:
-                df_aud = pd.read_excel(FILE_HASIL_TRUCKING, sheet_name=sheet)
-                col_n  = 'Nama Unit' if 'Nama Unit' in df_aud.columns else ('Nama_Unit' if 'Nama_Unit' in df_aud.columns else 'Kode_Lambung')
-                for _, row in df_aud.iterrows():
-                    raw_u     = str(row.get(col_n, ''))
-                    match_key = get_smart_match(raw_u, master_dict)
-                    if match_key:
-                        meta = master_dict[match_key]
-                        list_audit.append({
-                            'Nama Unit': meta['Real_Name'], 'Jenis': meta['Jenis'],
-                            'Type/Merk': meta['Type/Merk'], 'Lokasi': meta['Lokasi'],
-                            'Horse Power': meta['Horse Power'], 'Capacity (Feet)': 40,
-                            'Total Pengisian BBM (L)': row.get('LITER', 0),
-                            'Total Kerja (Ton*Km)': row.get('Total_TonKm', 0),
-                            'Keterangan': f"Inaktif ({sheet})"
-                        })
-            except:
-                pass
-    if list_audit: df_missing_truck = pd.DataFrame(list_audit)
-    return df_trucking, df_monthly_trucking, df_missing_truck
-
 # 6. SIDEBAR & MENU NAVIGASI
-st.sidebar.subheader("Menu Navigasi")
-category_filter = st.sidebar.radio(
-    "Pilih Fitur Aplikasi:",
-    ["Forecast Data"]
-    #["Analisa Trucking", "Analisa Non-Trucking", "Forecast Data"]
-)
+category_filter = "Forecast Data"
 
 st.sidebar.markdown("---")
 
@@ -277,7 +50,7 @@ st.sidebar.markdown("---")
 if category_filter == "Forecast Data":
     st.header("Forecast Hour Meter & Kebutuhan BBM")
 
-    #PANDUAN FORMAT & TEMPLATE
+    # PANDUAN FORMAT & TEMPLATE
     with st.expander("📋 Panduan Format & Template File", expanded=False):
         st.markdown("#### 🔗 Template File (klik untuk membuka di Google Sheets)")
         tl1, tl2 = st.columns(2)
@@ -333,17 +106,16 @@ if category_filter == "Forecast Data":
             "- Nilai di kolom `CAP` dan `HP` harus berupa **angka**, bukan teks."
         )
 
-        st.markdown("**Konsumsi BBM Standar Pabrik (Opsional)**")
+        st.markdown("**Konsumsi BBM Standar Pabrik**")
         st.markdown(
-            "- Format file wajib **`.xlsx`**.\n"
-            "- Hanya upload **1 file** (jika diupload).\n"
-            "- File ini **tidak dibuat manual**, file ini dihasilkan secara otomatis dari script "
-            "`forecastHMArimaGBEnsemble.py` saat dijalankan dengan `MODE = 'crawl'`. "
-            "Selama format output script crawling tidak diubah, file yang dihasilkan dapat "
-            "langsung digunakan tanpa modifikasi apapun.\n"
-            "- Data harus berada di **sheet pertama** file, apapun nama sheet-nya.\n"
-            "- Jika file ini tidak diupload, kolom standar pabrik pada hasil forecast akan dikosongkan "
-            "dan perbandingan vs standar pabrik tidak akan tersedia."
+            "- File ini **tidak perlu diupload secara manual**. Data standar konsumsi BBM pabrik "
+            "akan didapatkan secara otomatis melalui sistem, tergantung pilihan proses yang dipilih:\n"
+            "  - **Crawl Standar Pabrik + Forecast**: mengambil ulang data standar terbaru "
+            "berdasarkan file Detail Alat Berat yang diupload, lalu otomatis melanjutkan ke proses forecast.\n"
+            "  - **Forecast Langsung**: menggunakan hasil crawling standar pabrik yang tersimpan "
+            "paling akhir di server, tanpa mengambil ulang data baru.\n"
+            "- Jika belum pernah ada hasil crawling tersimpan di server, kolom standar pabrik pada "
+            "hasil forecast akan dikosongkan dan perbandingan vs standar pabrik tidak akan tersedia."
         )
 
     # UPLOAD FILE DATA
@@ -363,12 +135,6 @@ if category_filter == "Forecast Data":
             "2. Data Test (boleh lebih dari 1 file)",
             type=["xlsx"], accept_multiple_files=True, key="fcst_test"
         )
-        f_standar = st.file_uploader(
-            "4. Konsumsi BBM Standar Pabrik (Opsional, 1 file)",
-            type=["xlsx"], accept_multiple_files=False, key="fcst_standar"
-        )
-    if f_standar is None:
-        st.info("ℹ️ File standar pabrik tidak diupload. Kolom standar pabrik akan dikosongkan.")
 
     col_batas1, col_batas2 = st.columns(2)
     with col_batas1:
@@ -383,6 +149,19 @@ if category_filter == "Forecast Data":
             value="2025-01",
             help="Semua data mulai bulan ini akan dijadikan data test."
         )
+
+    st.markdown("### ⚙️ Pilihan Proses")
+    mode_proses = st.radio(
+        "Pilih jenis proses yang ingin dijalankan:",
+        ["🌐 Crawl Standar Pabrik + Forecast", "🚀 Forecast Langsung (pakai standar pabrik terakhir)"],
+        help=(
+            "**Crawl Standar Pabrik + Forecast**: mengambil ulang data standar konsumsi BBM pabrik "
+            "berdasarkan file Detail Alat Berat yang diupload, lalu otomatis melanjutkan ke proses forecast.\n\n"
+            "**Forecast Langsung**: melewati proses crawl dan langsung menjalankan forecast menggunakan "
+            "hasil crawling standar pabrik yang tersimpan paling akhir di server."
+        )
+    )
+    is_mode_crawl = mode_proses.startswith("🌐")
 
     if st.button("🚀 Jalankan Proses Forecast HM"):
         if f_train_files and f_test_files and f_master:
@@ -509,12 +288,172 @@ if category_filter == "Forecast Data":
                                     'hp':        hp,
                                 }
 
-                    # LOAD STANDAR PABRIK
-                    standar_per_key = {}
-                    if f_standar is not None:
+                    # ----------------------------------------------------------
+                    # STANDAR PABRIK: CRAWL (jika mode crawl) ATAU BACA DARI SERVER
+                    # ----------------------------------------------------------
+                    def crawl_standar_pabrik_openai(key_to_specs_dict, api_key):
+                        """Crawl estimasi standar konsumsi BBM per kombinasi jenis/type/cap/hp via OpenAI."""
+                        client     = OpenAI(api_key=api_key)
+                        hasil      = {}
+                        total_keys = len(key_to_specs_dict)
+
+                        CAPS_PER_JENIS = {
+                            'FORKLIFT':      (0.5, 15.0),
+                            'REACH STACKER': (5.0, 25.0),
+                            'CRANE':         (4.0, 40.0),
+                            'LOADER':        (3.0, 20.0),
+                            'TRONTON':       (2.0, 12.0),
+                            'TRAILER':       (2.0, 12.0),
+                            'HEAD':          (2.0, 12.0),
+                            'TRUCK':         (2.0, 12.0),
+                            'DEFAULT':       (0.5, 50.0),
+                        }
+
+                        def get_cap(jenis_str):
+                            j = jenis_str.upper()
+                            for k, v in CAPS_PER_JENIS.items():
+                                if k in j:
+                                    return v
+                            return CAPS_PER_JENIS['DEFAULT']
+
+                        def clamp(val, lo, hi):
+                            try:
+                                return max(lo, min(hi, float(val)))
+                            except (TypeError, ValueError):
+                                return None
+
+                        crawl_prog = st.progress(0, text="Memulai crawling standar pabrik...")
+
+                        for idx, (key, specs) in enumerate(key_to_specs_dict.items()):
+                            crawl_prog.progress((idx + 1) / total_keys,
+                                                text=f"Crawling: {key} ({idx+1}/{total_keys})")
+                            jenis  = specs['jenis']
+                            type_m = specs['type_merk']
+                            cap    = specs['cap']
+                            hp     = specs['hp']
+
+                            jenis_upper = jenis.upper()
+                            is_wheeled  = any(k in jenis_upper for k in ['TRONTON', 'TRAILER', 'HEAD', 'TRUCK'])
+
+                            if is_wheeled:
+                                cap_display = (f"{cap} feet (ukuran peti kemas/container)"
+                                              if cap != 'Tidak Diketahui' else cap)
+                                panduan_khusus = (
+                                    "\nPERHATIAN KHUSUS — Kendaraan Angkut Beroda (Tronton/Trailer/Head/Truck):\n"
+                                    f"- Kapasitas '{cap}' di atas adalah ukuran peti kemas dalam FEET (bukan ton beban).\n"
+                                    "  Contoh: 20 feet = kontainer 20 kaki, 40 feet = kontainer 40 kaki.\n"
+                                    "  Jangan menafsirkan angka kapasitas ini sebagai berat muatan dalam ton.\n"
+                                    "- Satuan konsumsi yang diminta adalah Liter per Jam operasional mesin menyala (bukan L/km).\n"
+                                    "- Konsumsi wajar kendaraan kelas ini saat operasional normal: 2-12 L/Jam.\n"
+                                    "- HP tinggi (200-500 HP) pada kendaraan beroda TIDAK berarti konsumsi 15+ L/Jam;\n"
+                                    "  engine truck beroperasi jauh di bawah kapasitas maksimum saat berjalan normal.\n"
+                                    "- Nilai di atas 15 L/Jam untuk jenis kendaraan ini hampir pasti TIDAK WAJAR.\n"
+                                    "- Gunakan referensi konsumsi BBM riil truck/trailer logistik, bukan mesin stasioner.\n"
+                                )
+                            else:
+                                cap_display    = f"{cap} ton"
+                                panduan_khusus = ""
+
+                            prompt = f"""Anda adalah database spesifikasi teknis alat berat industri pelabuhan dan logistik.
+Berikan estimasi standar konsumsi bahan bakar (fuel consumption) dalam satuan Liter per Jam (L/Jam)
+untuk alat berat dengan spesifikasi berikut:
+
+- Jenis Alat   : {jenis}
+- Type / Merk  : {type_m}
+- Kapasitas    : {cap_display}
+- Horse Power  : {hp} HP ('Tidak Diketahui' jika tidak tersedia)
+{panduan_khusus}
+Panduan estimasi:
+1. Gunakan data spesifikasi resmi pabrik jika type/merk dikenali secara spesifik.
+2. Jika tidak dikenali, gunakan rentang umum berdasarkan jenis alat dan HP-nya.
+3. Jika HP tidak diketahui, estimasi berdasarkan jenis dan kapasitas saja.
+4. Asumsikan kondisi operasional normal: beban penuh, medan datar, suhu 25-35 derajat Celsius.
+5. Jawab HANYA dalam format JSON berikut tanpa penjelasan atau teks tambahan apapun:
+{{
+  "konsumsi_min_L_per_jam": <angka float>,
+  "konsumsi_max_L_per_jam": <angka float>,
+  "konsumsi_tengah_L_per_jam": <angka float>,
+  "sumber_info": "<nama model spesifik jika diketahui, atau rentang kelas jenis alat>",
+  "catatan": "<asumsi kondisi operasional, maks 120 karakter>"
+}}"""
+
+                            MAX_RETRIES = 3
+                            berhasil    = False
+
+                            for attempt in range(MAX_RETRIES):
+                                try:
+                                    response = client.chat.completions.create(
+                                        model="gpt-4o-mini",
+                                        messages=[{"role": "user", "content": prompt}],
+                                        temperature=0.1,
+                                        max_tokens=300
+                                    )
+                                    raw_text = response.choices[0].message.content.strip()
+                                    raw_text = re.sub(r'```json|```', '', raw_text).strip()
+                                    parsed   = json.loads(raw_text)
+
+                                    cap_lo, cap_hi = get_cap(jenis)
+                                    val_min = clamp(parsed.get('konsumsi_min_L_per_jam',    0), cap_lo, cap_hi)
+                                    val_max = clamp(parsed.get('konsumsi_max_L_per_jam',    0), cap_lo, cap_hi)
+                                    val_tgh = clamp(parsed.get('konsumsi_tengah_L_per_jam', 0), cap_lo, cap_hi)
+
+                                    if val_min is not None and val_max is not None and val_tgh is not None:
+                                        val_min = min(val_min, val_max)
+                                        val_tgh = max(val_min, min(val_tgh, val_max))
+
+                                    hasil[key] = {
+                                        'Standar Pabrik Konsumsi BBM Per Jam':     round(val_tgh, 2) if val_tgh is not None else None,
+                                        'Standar Pabrik Konsumsi BBM Min (L/Jam)': round(val_min, 2) if val_min is not None else None,
+                                        'Standar Pabrik Konsumsi BBM Max (L/Jam)': round(val_max, 2) if val_max is not None else None,
+                                        'Sumber Data Standar Pabrik':              str(parsed.get('sumber_info', '-')),
+                                        'Catatan Standar Pabrik':                  str(parsed.get('catatan', '-')),
+                                    }
+                                    berhasil = True
+                                    time.sleep(1)
+                                    break
+
+                                except json.JSONDecodeError as e:
+                                    hasil[key] = {
+                                        'Standar Pabrik Konsumsi BBM Per Jam':     None,
+                                        'Standar Pabrik Konsumsi BBM Min (L/Jam)': None,
+                                        'Standar Pabrik Konsumsi BBM Max (L/Jam)': None,
+                                        'Sumber Data Standar Pabrik':              'Gagal diproses (JSON error)',
+                                        'Catatan Standar Pabrik':                  str(e)[:100],
+                                    }
+                                    break
+
+                                except Exception as e:
+                                    if '429' in str(e) or 'rate' in str(e).lower():
+                                        time.sleep(30 * (attempt + 1))
+                                    else:
+                                        hasil[key] = {
+                                            'Standar Pabrik Konsumsi BBM Per Jam':     None,
+                                            'Standar Pabrik Konsumsi BBM Min (L/Jam)': None,
+                                            'Standar Pabrik Konsumsi BBM Max (L/Jam)': None,
+                                            'Sumber Data Standar Pabrik':              'Error API',
+                                            'Catatan Standar Pabrik':                  str(e)[:100],
+                                        }
+                                        break
+
+                            if not berhasil and key not in hasil:
+                                hasil[key] = {
+                                    'Standar Pabrik Konsumsi BBM Per Jam':     None,
+                                    'Standar Pabrik Konsumsi BBM Min (L/Jam)': None,
+                                    'Standar Pabrik Konsumsi BBM Max (L/Jam)': None,
+                                    'Sumber Data Standar Pabrik':              'Gagal setelah max retry',
+                                    'Catatan Standar Pabrik':                  '-',
+                                }
+
+                        crawl_prog.empty()
+                        return hasil
+
+                    def load_standar_pabrik_dari_server(path_server):
+                        """Baca file Konsumsi BBM Standar Pabrik hasil crawl terakhir dari path server."""
+                        hasil = {}
+                        if not os.path.exists(path_server):
+                            return hasil
                         try:
-                            f_standar.seek(0)
-                            df_sp = pd.read_excel(f_standar)
+                            df_sp = pd.read_excel(path_server)
                             rename_sp = {
                                 'Standar_Konsumsi_L_per_Jam':     'Standar Pabrik Konsumsi BBM Per Jam',
                                 'Standar_Konsumsi_Min_L_per_Jam': 'Standar Pabrik Konsumsi BBM Min (L/Jam)',
@@ -525,7 +464,7 @@ if category_filter == "Forecast Data":
                             df_sp.rename(columns=rename_sp, inplace=True)
                             for _, row in df_sp.iterrows():
                                 key = str(row['Composite_Key'])
-                                standar_per_key[key] = {
+                                hasil[key] = {
                                     'Standar Pabrik Konsumsi BBM Per Jam':     row.get('Standar Pabrik Konsumsi BBM Per Jam'),
                                     'Standar Pabrik Konsumsi BBM Min (L/Jam)': row.get('Standar Pabrik Konsumsi BBM Min (L/Jam)'),
                                     'Standar Pabrik Konsumsi BBM Max (L/Jam)': row.get('Standar Pabrik Konsumsi BBM Max (L/Jam)'),
@@ -533,7 +472,48 @@ if category_filter == "Forecast Data":
                                     'Catatan Standar Pabrik':                  row.get('Catatan Standar Pabrik', '-'),
                                 }
                         except Exception as e_sp:
-                            st.warning(f"Gagal membaca file standar pabrik: {e_sp}")
+                            st.warning(f"Gagal membaca file standar pabrik dari server: {e_sp}")
+                        return hasil
+
+                    standar_per_key = {}
+
+                    if is_mode_crawl:
+                        if not OPENAI_API_KEY.strip():
+                            st.error("API Key belum dikonfigurasi oleh Tim IT. Hubungi Tim IT untuk mengisi API Key di kode aplikasi.")
+                            st.stop()
+
+                        st.info("🌐 Menjalankan crawling standar pabrik terlebih dahulu...")
+                        standar_per_key = crawl_standar_pabrik_openai(key_to_specs, OPENAI_API_KEY)
+
+                        # Simpan hasil crawl ke path server agar bisa dipakai ulang untuk mode "Forecast Langsung"
+                        try:
+                            rows_standar = []
+                            for key, val in standar_per_key.items():
+                                parts = key.split('|')
+                                rows_standar.append({
+                                    'Jenis_Alat':                              parts[0] if len(parts) > 0 else '-',
+                                    'Type_Merk':                               parts[1] if len(parts) > 1 else '-',
+                                    'Capacity':                                parts[2] if len(parts) > 2 else '-',
+                                    'Horse_Power':                             parts[3] if len(parts) > 3 else '-',
+                                    'Composite_Key':                           key,
+                                    'Standar Pabrik Konsumsi BBM Per Jam':     val['Standar Pabrik Konsumsi BBM Per Jam'],
+                                    'Standar Pabrik Konsumsi BBM Min (L/Jam)': val['Standar Pabrik Konsumsi BBM Min (L/Jam)'],
+                                    'Standar Pabrik Konsumsi BBM Max (L/Jam)': val['Standar Pabrik Konsumsi BBM Max (L/Jam)'],
+                                    'Sumber Data Standar Pabrik':              val['Sumber Data Standar Pabrik'],
+                                    'Catatan Standar Pabrik':                  val['Catatan Standar Pabrik'],
+                                })
+                            os.makedirs(os.path.dirname(PATH_STANDAR_PABRIK_SERVER), exist_ok=True)
+                            pd.DataFrame(rows_standar).to_excel(PATH_STANDAR_PABRIK_SERVER, index=False)
+                            st.success("✅ Hasil crawling disimpan ke server. Melanjutkan ke proses forecast...")
+                        except Exception as e_save:
+                            st.warning(f"Hasil crawling berhasil didapat tetapi gagal disimpan ke server: {e_save}. "
+                                       f"Proses forecast tetap dilanjutkan menggunakan hasil crawling saat ini.")
+                    else:
+                        standar_per_key = load_standar_pabrik_dari_server(PATH_STANDAR_PABRIK_SERVER)
+                        if not standar_per_key:
+                            st.warning("⚠️ File standar pabrik belum tersedia di server. Forecast tetap berjalan "
+                                       "tapi kolom standar pabrik tidak akan terisi. Jalankan mode 'Crawl Standar "
+                                       "Pabrik + Forecast' minimal sekali sebelumnya.")
 
                     def get_mapped_unit_name_fcst(unit_name):
                         hardcoded = {
@@ -1122,7 +1102,7 @@ if category_filter == "Forecast Data":
                     fig_line.add_trace(go.Scatter(
                         x=df_hist_unit['TAHUN_BULAN'].tolist(),
                         y=[float(v) for v in df_hist_unit[y_hist].tolist()],
-                        mode='lines+markers', name='Aktual 2023-2024',
+                        mode='lines+markers', name='Aktual Data Train',
                         line=dict(color='#636efa', width=2), marker=dict(size=6)
                     ))
 
@@ -1137,14 +1117,14 @@ if category_filter == "Forecast Data":
                     fig_line.add_trace(go.Scatter(
                         x=[last_bln] + bulan_2025,
                         y=[last_val] + safe_float_list(df_aktual_unit[y_akt]),
-                        mode='lines+markers', name='Aktual 2025',
+                        mode='lines+markers', name='Aktual Data Test',
                         line=dict(color='#00cc96', width=2), marker=dict(size=7, symbol='square')
                     ))
 
                     fig_line.add_trace(go.Scatter(
                         x=[last_bln] + bulan_2025,
                         y=[last_val] + safe_float_list(df_aktual_unit[y_tp]),
-                        mode='lines+markers', name='Proyeksi 2025',
+                        mode='lines+markers', name='Hasil Forecast',
                         line=dict(color='#d62728', width=3), marker=dict(size=8, symbol='diamond')
                     ))
 
@@ -1279,215 +1259,3 @@ if category_filter == "Forecast Data":
             )
             st.caption("Sheet: Komparasi_Model | Akurasi_Bagus_Under35 | Akurasi_Rendah_Over35 | "
                        "Metrik_Per_Unit | Deviasi_Standar_Pabrik | Unit_Dikecualikan")
-
-# BAGIAN B: DASHBOARD UTAMA (TRUCKING / NON-TRUCKING)
-else:
-    BIAYA_PER_LITER = st.sidebar.number_input("Biaya Bahan Bakar (Rp/Liter)", min_value=0, value=6800, step=100)
-
-    df_active_raw = pd.DataFrame()
-    df_monthly    = pd.DataFrame()
-    df_missing    = pd.DataFrame()
-
-    if category_filter == "Analisa Trucking":
-        with st.spinner("Memproses Data Trucking..."):
-            df_active_raw, df_monthly, df_missing = process_trucking()
-            mode_label  = "Trucking"
-            ratio_label = "L/Ton*Km"
-            work_col    = "Total Kerja (Ton*Km)"
-    else:
-        with st.spinner("Memuat Data Non-Trucking..."):
-            df_active_raw, df_monthly, df_missing = process_alat_berat()
-            mode_label  = "Non-Trucking"
-            ratio_label = "L/Ton"
-            work_col    = "Total Berat Angkutan (Ton)"
-
-    if not df_active_raw.empty:
-
-        df_inaktif_from_active = df_active_raw[
-            (df_active_raw['Total Pengisian BBM (L)'] <= 0) |
-            (df_active_raw[work_col] <= 0)
-        ].copy()
-
-        if not df_inaktif_from_active.empty:
-            col_bbm    = 'Total Pengisian BBM (L)'
-            conditions = [
-                (df_inaktif_from_active[col_bbm] <= 0) & (df_inaktif_from_active[work_col] <= 0),
-                (df_inaktif_from_active[work_col] <= 0),
-                (df_inaktif_from_active[col_bbm] <= 0)
-            ]
-            choices = ["Tidak ada aktivitas", "Unit tidak melakukan aktivitas kerja", "Unit tidak pernah mengisi BBM"]
-            df_inaktif_from_active['Keterangan'] = np.select(conditions, choices, default="-")
-
-        list_inaktif = []
-        if not df_inaktif_from_active.empty: list_inaktif.append(df_inaktif_from_active)
-
-        if not df_missing.empty:
-            if 'Total Pengisian BBM' in df_missing.columns:
-                df_missing.rename(columns={'Total Pengisian BBM': 'Total Pengisian BBM (L)'}, inplace=True)
-            m_bbm_col  = 'Total Pengisian BBM (L)'
-            m_work_col = work_col
-            if m_bbm_col in df_missing.columns and m_work_col in df_missing.columns:
-                m_conds = [
-                    (df_missing[m_bbm_col] <= 0) & (df_missing[m_work_col] <= 0),
-                    (df_missing[m_work_col] <= 0),
-                    (df_missing[m_bbm_col] <= 0)
-                ]
-                m_choices = ["Tidak ada aktivitas", "Unit tidak melakukan aktivitas kerja", "Unit tidak pernah mengisi BBM"]
-                df_missing['Keterangan'] = np.select(m_conds, m_choices, default="Inaktif (Sumber: File Audit)")
-            else:
-                df_missing['Keterangan'] = "Inaktif (Sumber: File Audit)"
-            list_inaktif.append(df_missing)
-
-        df_inaktif_all = pd.concat(list_inaktif, ignore_index=True) if list_inaktif else pd.DataFrame()
-        df_active      = df_active_raw[(df_active_raw['Total Pengisian BBM (L)'] > 0) & (df_active_raw[work_col] > 0)].copy()
-        df_full_filter = pd.concat([df_active, df_inaktif_all], ignore_index=True) if not df_inaktif_all.empty else df_active
-
-        st.sidebar.markdown("---")
-        st.sidebar.header("Filter Data")
-        lokasi_list   = ["Semua"] + sorted(df_full_filter['Lokasi'].dropna().unique().tolist())
-        selected_lok  = st.sidebar.selectbox("📍 Filter Lokasi", lokasi_list)
-        jenis_list    = ["Semua"] + sorted(df_full_filter['Jenis'].dropna().unique().tolist())
-        selected_jen  = st.sidebar.selectbox("🚜 Filter Jenis", jenis_list)
-        type_list     = ["Semua"] + sorted(df_full_filter['Type/Merk'].dropna().astype(str).unique().tolist())
-        selected_type = st.sidebar.selectbox("🏷️ Filter Type/Merk", type_list)
-
-        st.markdown("### 🛑 Daftar Unit Inaktif")
-        st.caption("Unit yang terdeteksi tidak aktif karena tidak ada pengisian BBM atau tidak ada aktivitas kerja")
-        df_inaktif_f = df_inaktif_all.copy()
-        if not df_inaktif_f.empty:
-            if selected_lok  != "Semua": df_inaktif_f = df_inaktif_f[df_inaktif_f['Lokasi'] == selected_lok]
-            if selected_jen  != "Semua": df_inaktif_f = df_inaktif_f[df_inaktif_f['Jenis'] == selected_jen]
-            if selected_type != "Semua": df_inaktif_f = df_inaktif_f[df_inaktif_f['Type/Merk'] == selected_type]
-            if not df_inaktif_f.empty:
-                if mode_label == "Trucking":
-                    cols_in = ['Nama Unit','Jenis','Type/Merk','Lokasi','Horse Power','Capacity (Feet)','Total Pengisian BBM (L)',work_col,'Keterangan']
-                    fmt_in  = {'Capacity (Feet)': '{:.0f}', 'Total Pengisian BBM (L)': '{:,.0f}'}
-                else:
-                    cols_in = ['Nama Unit','Jenis','Type/Merk','Lokasi','Horse Power','Capacity (Ton)','Total Pengisian BBM (L)',work_col,'Keterangan']
-                    fmt_in  = {'Capacity (Ton)': '{:.0f}', 'Horse Power': '{:.0f}', 'Total Pengisian BBM (L)': '{:,.0f}', 'Total Berat Angkutan (Ton)': '{:,.0f}'}
-                cols_show = [c for c in cols_in if c in df_inaktif_f.columns]
-                st.dataframe(df_inaktif_f[cols_show].style.format(fmt_in, na_rep="-"), use_container_width=True)
-            else:
-                st.success("Tidak ada unit inaktif untuk kombinasi filter ini.")
-        else:
-            st.success("Seluruh unit beroperasi aktif.")
-        st.markdown("---")
-
-        st.markdown("### 🔍 Cari Data Spesifik (Unit Aktif)")
-        cs1, cs2 = st.columns([1, 3])
-        with cs1:  search_cat = st.selectbox("Cari Berdasarkan:", ["Nama Unit"])
-        with cs2:  search_q   = st.text_input(f"Ketik {search_cat}:", "")
-
-        df_filtered = df_active.copy()
-        if selected_lok  != "Semua": df_filtered = df_filtered[df_filtered['Lokasi'] == selected_lok]
-        if selected_jen  != "Semua": df_filtered = df_filtered[df_filtered['Jenis'] == selected_jen]
-        if selected_type != "Semua": df_filtered = df_filtered[df_filtered['Type/Merk'] == selected_type]
-        if search_q:
-            df_filtered = df_filtered[df_filtered['Nama Unit'].str.contains(search_q, case=False, na=False)]
-
-        df_filtered['Total Biaya BBM'] = df_filtered['Total Pengisian BBM (L)'] * BIAYA_PER_LITER
-
-        if not df_monthly.empty:
-            df_monthly_filtered = df_monthly[df_monthly['Nama Unit'].isin(df_filtered['Nama Unit'])].copy()
-        else:
-            df_monthly_filtered = pd.DataFrame()
-
-        if mode_label == "Trucking":
-            total_bbm   = df_filtered['Total Pengisian BBM (L)'].sum()
-            total_kerja = df_filtered['Total Kerja (Ton*Km)'].sum()
-            total_biaya = df_filtered['Total Biaya BBM'].sum()
-            total_aktif = len(df_filtered)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Unit Aktif",     f"{total_aktif} Unit")
-            c2.metric("Total Kerja (Ton*Km)", f"{total_kerja:,.0f}")
-            c3.metric("Total Pengisian BBM",  f"{total_bbm:,.0f} L")
-            c4.metric("Total Biaya BBM (Rp)", f"Rp {total_biaya:,.0f}")
-        else:
-            total_bbm   = df_filtered['Total Pengisian BBM (L)'].sum()
-            total_ton   = df_filtered['Total Berat Angkutan (Ton)'].sum()
-            total_biaya = df_filtered['Total Biaya BBM'].sum()
-            total_aktif = len(df_filtered)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Unit Aktif",       f"{total_aktif} Unit")
-            c2.metric("Total Tonase Container", f"{total_ton:,.0f} Ton")
-            c3.metric("Total Pengisian BBM",    f"{total_bbm:,.0f} L")
-            c4.metric("Total Biaya BBM (Rp)",   f"Rp {total_biaya:,.0f}")
-
-        st.markdown("---")
-
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview Data", "📈 Efisiensi Setiap Unit", "📍 Korelasi Beban & BBM", "💸 Unit Terboros"])
-
-        ratio_col = 'Fuel Ratio (L/Ton*Km)' if mode_label == "Trucking" else 'Fuel Ratio (L/Ton)'
-        bm_col    = 'Benchmark (L/Ton*Km)'  if mode_label == "Trucking" else 'Benchmark (L/Ton)'
-
-        def highlight_fuel_ratio(row):
-            styles = [''] * len(row)
-            for i, col in enumerate(row.index):
-                if col == ratio_col:
-                    val, bm = row[col], row[bm_col]
-                    if pd.notna(val) and pd.notna(bm) and bm > 0:
-                        styles[i] = ('background-color: #d62728; color: white; font-weight: bold;'
-                                     if val > bm else
-                                     'background-color: #2ca02c; color: white; font-weight: bold;')
-            return styles
-
-        with tab1:
-            st.subheader(f"Data Detail {mode_label}")
-            sort_opts = ["Fuel Ratio (Tertinggi)", "Fuel Ratio (Terendah)", "Total Kerja (Tertinggi)", "Total Pengisian BBM (L) (Tertinggi)"]
-            sort_by   = st.selectbox("Sort by:", sort_opts)
-            if sort_by == "Fuel Ratio (Tertinggi)":                df_filtered = df_filtered.sort_values(ratio_col, ascending=False)
-            elif sort_by == "Fuel Ratio (Terendah)":               df_filtered = df_filtered.sort_values(ratio_col, ascending=True)
-            elif sort_by == "Total Kerja (Tertinggi)":             df_filtered = df_filtered.sort_values(work_col,  ascending=False)
-            elif sort_by == "Total Pengisian BBM (L) (Tertinggi)": df_filtered = df_filtered.sort_values('Total Pengisian BBM (L)', ascending=False)
-
-            if mode_label == "Trucking":
-                cols_s = ['Nama Unit','Jenis','Lokasi','Horse Power','Capacity (Feet)','Total Pengisian BBM (L)','Total Biaya BBM','Total Berat Angkutan (Ton)','Total Kerja (Ton*Km)','Benchmark (L/Ton*Km)','Fuel Ratio (L/Ton*Km)','Potensi Pemborosan BBM (L)']
-                fmt_d  = {'Capacity (Feet)':'{:.0f}','Total Pengisian BBM (L)':'{:,.0f}','Total Biaya BBM':'Rp {:,.0f}','Total Berat Angkutan (Ton)':'{:,.0f}','Total Kerja (Ton*Km)':'{:,.0f}','Benchmark (L/Ton*Km)':'{:.4f}','Fuel Ratio (L/Ton*Km)':'{:.4f}','Potensi Pemborosan BBM (L)':'{:,.0f}'}
-                st.dataframe(df_filtered[cols_s].style.apply(highlight_fuel_ratio, axis=1).format(fmt_d))
-            else:
-                cols_s = ['Nama Unit','Jenis','Type/Merk','Horse Power','Capacity (Ton)','Lokasi','Total Pengisian BBM (L)','Total Biaya BBM','Total Berat Angkutan (Ton)','Benchmark (L/Ton)','Fuel Ratio (L/Ton)','Potensi Pemborosan BBM (L)']
-                fmt_d  = {'Total Pengisian BBM (L)':'{:,.0f}','Total Biaya BBM':'Rp {:,.0f}','Total Berat Angkutan (Ton)':'{:,.0f}','Benchmark (L/Ton)':'{:.4f}','Fuel Ratio (L/Ton)':'{:.4f}','Potensi Pemborosan BBM (L)':'{:,.0f}'}
-                cols_ok = [c for c in cols_s if c in df_filtered.columns]
-                st.dataframe(df_filtered[cols_ok].style.apply(highlight_fuel_ratio, axis=1).format(fmt_d, na_rep="-"))
-
-        with tab2:
-            st.subheader(f"Efisiensi BBM per Unit ({mode_label})")
-            if not df_filtered.empty:
-                df_eff = df_filtered[[ratio_col, 'Nama Unit', bm_col, 'Status']].dropna(subset=[ratio_col])
-                df_eff = df_eff[df_eff[ratio_col] > 0].sort_values(ratio_col, ascending=False)
-                fig_eff = px.bar(df_eff, x='Nama Unit', y=ratio_col,
-                                 color='Status', color_discrete_map={'Efisien': '#2ca02c', 'Boros': '#d62728'},
-                                 title=f"Fuel Ratio per Unit ({ratio_label})")
-                if not df_eff.empty:
-                    fig_eff.add_hline(y=df_eff[bm_col].mean(), line_dash="dash", line_color="blue",
-                                      annotation_text=f"Benchmark: {df_eff[bm_col].mean():.4f}")
-                fig_eff.update_layout(xaxis_tickangle=-45, height=500)
-                st.plotly_chart(fig_eff, use_container_width=True)
-
-        with tab3:
-            st.subheader("Korelasi Beban Kerja & BBM")
-            if not df_filtered.empty and work_col in df_filtered.columns:
-                fig_sc = px.scatter(df_filtered, x=work_col, y='Total Pengisian BBM (L)',
-                                    color='Status', hover_name='Nama Unit', size='Total Pengisian BBM (L)',
-                                    color_discrete_map={'Efisien': '#2ca02c', 'Boros': '#d62728'},
-                                    title=f"Korelasi {work_col} vs Total BBM")
-                st.plotly_chart(fig_sc, use_container_width=True)
-
-        with tab4:
-            st.subheader("Unit dengan Potensi Pemborosan BBM Tertinggi")
-            df_boros = df_filtered[df_filtered['Status'] == 'Boros'].sort_values('Potensi Pemborosan BBM (L)', ascending=False)
-            if not df_boros.empty:
-                fig_boros = px.bar(df_boros.head(20), x='Nama Unit', y='Potensi Pemborosan BBM (L)',
-                                   color='Potensi Pemborosan BBM (L)',
-                                   color_continuous_scale='Reds',
-                                   title="Top 20 Unit dengan Potensi Pemborosan BBM Terbesar")
-                fig_boros.update_layout(xaxis_tickangle=-45, height=500)
-                st.plotly_chart(fig_boros, use_container_width=True)
-
-                total_boros = df_boros['Potensi Pemborosan BBM (L)'].sum()
-                biaya_boros = total_boros * BIAYA_PER_LITER
-                b1, b2 = st.columns(2)
-                b1.metric("Total Potensi Pemborosan (L)",  f"{total_boros:,.0f} L")
-                b2.metric("Total Potensi Pemborosan (Rp)", f"Rp {biaya_boros:,.0f}")
-            else:
-                st.success("Tidak ada unit yang terdeteksi boros berdasarkan filter saat ini.")
